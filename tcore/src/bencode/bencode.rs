@@ -1,3 +1,5 @@
+#![allow(unused)] // FIXME:
+
 use std::{collections::HashMap, io::BufRead};
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -44,6 +46,7 @@ enum DecoderState {
     NeedRefill,
 }
 
+#[derive(Debug)]
 enum NestedType {
     List(ListBuilder),
     Dict(DictBuilder),
@@ -58,6 +61,7 @@ impl NestedType {
     }
 }
 
+#[derive(Debug)]
 struct ListBuilder {
     list: Vec<Value>,
 }
@@ -72,6 +76,7 @@ impl ListBuilder {
     }
 }
 
+#[derive(Debug)]
 struct DictBuilder {
     dict: HashMap<String, Value>,
     pending_key: Option<String>,
@@ -123,6 +128,7 @@ where
     }
 
     //FIXME: an error type
+    //FIXME: CLEAN THAT BARELY READABLE MESS
     pub fn decode(&mut self) -> Result<Value, &'static str> {
         loop {
             match self.state {
@@ -167,11 +173,12 @@ where
                                     }
                                     NestedType::Dict(d) => {
                                         if None == d.pending_key {
-                                            return Err(
-                                                "trying to insert integer as a key in dictionary",
-                                            );
+                                            if let Value::String(str) = str {
+                                                d.set_key(str);
+                                            }
+                                        } else {
+                                            d.set_value(str);
                                         }
-                                        d.set_value(str);
                                     }
                                 }
                             } else {
@@ -192,6 +199,7 @@ where
                         }
                         Token::EndOfObj => {
                             if let Some(v) = self.stack.pop() {
+                                dbg!(&v);
                                 if let Some(top) = self.stack.last_mut() {
                                     match top {
                                         NestedType::List(l) => {
@@ -237,8 +245,16 @@ where
         };
 
         match b {
-            b'i' => parse_int(&self.buf),
-            b'0'..=b'9' => parse_string(&self.buf),
+            b'i' => {
+                let (token, len) = parse_int(&self.buf)?;
+                self.buf.advance(len);
+                Ok(token)
+            }
+            b'0'..=b'9' => {
+                let (token, len) = parse_string(&self.buf)?;
+                self.buf.advance(len);
+                Ok(token)
+            }
             b'l' => Ok(Token::BeginList),
             b'd' => Ok(Token::BeginDict),
             b'e' => Ok(Token::EndOfObj),
@@ -252,7 +268,11 @@ where
             Ok(tmp) => tmp,
             Err(_) => return Err("can't refill"),
         };
-        self.buf.put(tmp);
+        let len = tmp.len();
+        if len > 0 {
+            self.buf.extend_from_slice(tmp);
+            self.src.consume(len);
+        }
         Ok(())
     }
 }
@@ -285,6 +305,8 @@ mod test_decoder {
         );
     }
 
+    //TODO: test nested lists
+
     #[test]
     fn valid_flat_dict() {
         let src = b"d4:testi42ee";
@@ -297,6 +319,10 @@ mod test_decoder {
             )])))
         )
     }
+
+    //TODO: test nested dicts
+
+    //TODO: test nested lists and dicts combined
 }
 
 #[derive(PartialEq, Debug)]
@@ -311,7 +337,7 @@ pub enum Token {
 
 /// expects string token
 //FIXME: an error type
-fn parse_string(buf: &[u8]) -> Result<Token, &'static str> {
+fn parse_string(buf: &[u8]) -> Result<(Token, usize), &'static str> {
     let i = match buf.iter().position(|x| *x == b':') {
         Some(i) => i,
         None => return Err("invalid string"), // FIXME: not always true, might need more bytes
@@ -332,13 +358,14 @@ fn parse_string(buf: &[u8]) -> Result<Token, &'static str> {
         return Err("need more data"); // FIXME:
     }
 
-    Ok(Token::String(
-        String::from_utf8(buf[i + 1..].to_vec()).unwrap(),
+    Ok((
+        Token::String(String::from_utf8(buf[i + 1..i + 1 + len].to_vec()).unwrap()),
+        i + len + 1,
     )) // FIXME:
 }
 
 //FIXME: an error type
-pub fn parse_int(buf: &[u8]) -> Result<Token, &'static str> {
+pub fn parse_int(buf: &[u8]) -> Result<(Token, usize), &'static str> {
     let i = match buf.iter().position(|x| *x == b'e') {
         Some(i) => i,
         None => return Err("not enough bytes"), //FIXME:
@@ -350,7 +377,7 @@ pub fn parse_int(buf: &[u8]) -> Result<Token, &'static str> {
     }
 
     match atoi::atoi(&buf[1..i]) {
-        Some(n) => Ok(Token::Int(n)),
+        Some(n) => Ok((Token::Int(n), i + 1)),
         None => Err("syntax error"),
     }
 }
@@ -362,12 +389,17 @@ mod test_parsers {
     #[test]
     fn valid_string() {
         let buf = b"4:test";
-        assert_eq!(parse_string(buf), Ok(Token::String(String::from("test"))))
+        assert_eq!(
+            parse_string(buf),
+            Ok((Token::String(String::from("test")), 6))
+        )
     }
 
     #[test]
     fn valid_int() {
         let buf = b"i42e";
-        assert_eq!(parse_int(buf), Ok(Token::Int(42)))
+        assert_eq!(parse_int(buf), Ok((Token::Int(42), 4)))
     }
+
+    //TODO: test for failing cases
 }
