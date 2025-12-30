@@ -8,7 +8,7 @@ use std::{
 use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
 
-use crate::bencode::stack;
+use crate::bencode::stack::{self, Stack};
 
 // maybe i should just store references to bytes?
 #[derive(PartialEq, Debug)]
@@ -44,88 +44,12 @@ where
     src: T,
     buf: BytesMut,
     state: DecoderState,
-    stack: Vec<NestedType>,
+    stack: Stack,
 }
 
 enum DecoderState {
     Running,
     NeedRefill,
-}
-
-#[derive(Debug)]
-enum NestedType {
-    List(ListBuilder),
-    Dict(DictBuilder),
-}
-
-impl NestedType {
-    fn insert(&mut self, v: Value) {
-        match self {
-            Self::List(l) => l.insert(v),
-            Self::Dict(d) => d.insert(v),
-        }
-    }
-
-    fn to_value(self) -> Value {
-        match self {
-            Self::List(l) => Value::list(l.finish()),
-            Self::Dict(d) => Value::dictionary(d.finish()),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ListBuilder {
-    list: Vec<Value>,
-}
-
-impl ListBuilder {
-    fn new() -> ListBuilder {
-        ListBuilder { list: Vec::new() }
-    }
-
-    fn insert(&mut self, v: Value) {
-        self.list.push(v);
-    }
-
-    fn finish(self) -> Vec<Value> {
-        self.list
-    }
-}
-
-#[derive(Debug)]
-struct DictBuilder {
-    dict: HashMap<String, Value>,
-    pending_key: Option<String>,
-}
-
-impl DictBuilder {
-    fn new() -> DictBuilder {
-        DictBuilder {
-            dict: HashMap::new(),
-            pending_key: None,
-        }
-    }
-
-    fn insert(&mut self, v: Value) {
-        match self.pending_key.take() {
-            None => {
-                if let Value::String(s) = v {
-                    self.pending_key = Some(s);
-                } else {
-                    panic!("inserting non-string value as a key in dictionary");
-                    // FIXME: maybe should not panic
-                }
-            }
-            Some(k) => {
-                self.dict.insert(k, v);
-            }
-        }
-    }
-
-    fn finish(self) -> HashMap<String, Value> {
-        self.dict
-    }
 }
 
 #[derive(Error, Debug)]
@@ -147,7 +71,7 @@ where
             src: src,
             buf: BytesMut::with_capacity(4096),
             state: DecoderState::NeedRefill,
-            stack: Vec::new(),
+            stack: Stack::new(),
         }
     }
 
@@ -156,11 +80,10 @@ where
             src: src,
             buf: BytesMut::with_capacity(cap),
             state: DecoderState::NeedRefill,
-            stack: Vec::new(),
+            stack: Stack::new(),
         }
     }
 
-    //FIXME: CLEAN THAT BARELY READABLE MESS
     pub fn decode(&mut self) -> Result<Value, DecoderError> {
         loop {
             match self.state {
@@ -175,33 +98,25 @@ where
                     match maybe_token {
                         Some(token) => {
                             match token {
-                                Token::Int(i) => {
-                                    let i = Value::int(i);
-                                    match self.stack.last_mut() {
-                                        Some(top) => top.insert(i),
-                                        None => return Ok(i),
+                                Token::Int(v) => {
+                                    if let Some(v) = self.stack.push_value(Value::Int(v)) {
+                                        return Ok(v)
                                     }
                                 }
-                                Token::String(str) => {
-                                    let str = Value::string(str);
-                                    match self.stack.last_mut() {
-                                        Some(top) => top.insert(str),
-                                        None => return Ok(str),
+                                Token::String(v) => {
+                                    if let Some(v) = self.stack.push_value(Value::String(v)) {
+                                        return Ok(v)
                                     }
                                 }
                                 Token::BeginList => {
-                                    self.stack.push(NestedType::List(ListBuilder::new()));
+                                    self.stack.push_list();
                                 }
                                 Token::BeginDict => {
-                                    self.stack.push(NestedType::Dict(DictBuilder::new()));
+                                    self.stack.push_dict();
                                 }
                                 Token::EndOfObj => {
-                                    if let Some(v) = self.stack.pop() {
-                                        let v = v.to_value();
-                                        match self.stack.last_mut() {
-                                            Some(top) => top.insert(v),
-                                            None => return Ok(v),
-                                        }
+                                    if let Some(v) = self.stack.pop_container() {
+                                        return Ok(v);
                                     }
                                 }
                                 Token::Invalid => return Err(DecoderError::WrongSyntax),
@@ -223,20 +138,20 @@ where
 
         match b {
             b'i' => {
-                let (token, len) = match parse_int(&self.buf) {
+                let (maybe_token, len) = match parse_int(&self.buf) {
                     Ok(ok) => ok,
                     Err(e) => return Err(e),
                 };
                 self.advance_buff(len);
-                Ok(token)
+                Ok(maybe_token)
             }
             b'0'..=b'9' => {
-                let (token, len) = match parse_string(&self.buf) {
+                let (maybe_token, len) = match parse_string(&self.buf) {
                     Ok(ok) => ok,
                     Err(e) => return Err(e),
                 };
                 self.advance_buff(len);
-                Ok(token)
+                Ok(maybe_token)
             }
             b'l' => {
                 self.advance_buff(1);
