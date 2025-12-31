@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
+use crate::bencode::decoder::ByteString;
 use crate::bencode::decoder::Value;
 
 pub struct Stack {
@@ -29,6 +30,7 @@ impl Stack {
         self.stack.push(Container::new_dict());
     }
 
+    /// Pops the top container from the stack, and if it was the last item on stack, returns it.
     pub fn pop_container(&mut self) -> Option<Value> {
         let top = self.stack.pop()?;
         self.push_value(top.to_value())
@@ -83,14 +85,14 @@ impl ListBuilder {
 }
 
 struct DictBuilder {
-    dict: HashMap<String, Value>,
-    pending_key: Option<String>,
+    dict: BTreeMap<ByteString, Value>,
+    pending_key: Option<ByteString>,
 }
 
 impl DictBuilder {
     fn new() -> DictBuilder {
         DictBuilder {
-            dict: HashMap::new(),
+            dict: BTreeMap::new(),
             pending_key: None,
         }
     }
@@ -111,7 +113,7 @@ impl DictBuilder {
         }
     }
 
-    fn finish(self) -> HashMap<String, Value> {
+    fn finish(self) -> BTreeMap<ByteString, Value> {
         self.dict
     }
 }

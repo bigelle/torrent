@@ -1,8 +1,9 @@
 #![allow(unused)] // FIXME:
 
 use std::{
-    collections::HashMap,
-    io::{self, BufRead},
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    io::{self, BufRead, ErrorKind},
 };
 
 use bytes::{Buf, BufMut, BytesMut};
@@ -10,13 +11,15 @@ use thiserror::Error;
 
 use crate::bencode::stack::{self, Stack};
 
-// maybe i should just store references to bytes?
+/// ByteString - bencoded string as byte sequence
+pub type ByteString = Vec<u8>;
+
 #[derive(PartialEq, Debug)]
 pub enum Value {
     Int(isize),
-    String(String),
+    String(ByteString),
     List(Vec<Box<Value>>),
-    Dictionary(HashMap<String, Box<Value>>),
+    Dictionary(BTreeMap<ByteString, Box<Value>>),
 }
 
 impl Value {
@@ -24,15 +27,19 @@ impl Value {
         Value::Int(i)
     }
 
-    pub fn string<S: Into<String>>(s: S) -> Self {
-        Value::String(s.into())
+    pub fn string<A: Into<ByteString>>(v: A) -> Self {
+        Value::String(v.into())
+    }
+
+    pub fn string_ref<A: AsRef<[u8]>>(v: A) -> Self {
+        Value::String(v.as_ref().to_vec())
     }
 
     pub fn list(v: Vec<Value>) -> Self {
         Value::List(v.into_iter().map(Box::new).collect())
     }
 
-    pub fn dictionary(v: HashMap<String, Value>) -> Self {
+    pub fn dictionary(v: BTreeMap<ByteString, Value>) -> Self {
         Value::Dictionary(v.into_iter().map(|(k, v)| (k, Box::new(v))).collect())
     }
 }
@@ -53,13 +60,15 @@ enum DecoderState {
 }
 
 #[derive(Error, Debug)]
-pub enum DecoderError {
-    #[error("wrong syntax")]
-    WrongSyntax,
-    #[error("the value is too large")]
+pub enum DecodeError {
+    #[error("invalid bencode syntax")]
+    InvalidSyntax,
+    #[error("bencoded value is too large")]
     ValueTooLarge,
     #[error("unable to read file: {0}")]
     Io(#[from] io::Error),
+    #[error("unexpected EOF")]
+    UnexpectedEof,
 }
 
 impl<T> Decoder<T>
@@ -84,11 +93,14 @@ where
         }
     }
 
-    pub fn decode(&mut self) -> Result<Value, DecoderError> {
+    pub fn decode(&mut self) -> Result<Value, DecodeError> {
         loop {
             match self.state {
                 DecoderState::NeedRefill => {
-                    self.refill()?;
+                    let len = self.refill()?;
+                    if len == 0 {
+                        return Err(DecodeError::UnexpectedEof);
+                    }
                     self.state = DecoderState::Running;
                 }
 
@@ -100,12 +112,12 @@ where
                             match token {
                                 Token::Int(v) => {
                                     if let Some(v) = self.stack.push_value(Value::Int(v)) {
-                                        return Ok(v)
+                                        return Ok(v);
                                     }
                                 }
                                 Token::String(v) => {
                                     if let Some(v) = self.stack.push_value(Value::String(v)) {
-                                        return Ok(v)
+                                        return Ok(v);
                                     }
                                 }
                                 Token::BeginList => {
@@ -119,7 +131,7 @@ where
                                         return Ok(v);
                                     }
                                 }
-                                Token::Invalid => return Err(DecoderError::WrongSyntax),
+                                Token::Invalid => return Err(DecodeError::InvalidSyntax),
                             };
                         }
                         None => self.state = DecoderState::NeedRefill,
@@ -130,7 +142,7 @@ where
     }
 
     /// returns None if it needs more bytes
-    pub fn next<'a>(&mut self) -> Result<Option<Token>, DecoderError> {
+    pub fn next<'a>(&mut self) -> Result<Option<Token>, DecodeError> {
         let b = match self.buf.first() {
             Some(b) => b,
             None => return Ok(None),
@@ -169,17 +181,17 @@ where
         }
     }
 
-    fn refill(&mut self) -> Result<(), DecoderError> {
+    fn refill(&mut self) -> Result<usize, DecodeError> {
         let tmp = match self.src.fill_buf() {
             Ok(tmp) => tmp,
-            Err(e) => return Err(DecoderError::Io(e)),
+            Err(e) => return Err(DecodeError::Io(e)),
         };
         let len = tmp.len();
         if len > 0 {
             self.buf.extend_from_slice(tmp);
             self.src.consume(len);
         }
-        Ok(())
+        Ok(len)
     }
 
     fn advance_buff(&mut self, n: usize) {
@@ -197,7 +209,7 @@ mod test_decoder {
     fn valid_string() {
         let src = b"4:test";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::string("test"));
+        assert_eq!(dec.decode().unwrap(), Value::string(Vec::from("test")));
     }
 
     #[test]
@@ -213,7 +225,7 @@ mod test_decoder {
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(
             dec.decode().unwrap(),
-            Value::list(vec![Value::int(42), Value::string("test")])
+            Value::list(vec![Value::int(42), Value::string(Vec::from("test"))])
         );
     }
 
@@ -225,7 +237,7 @@ mod test_decoder {
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(
             dec.decode().unwrap(),
-            Value::dictionary(HashMap::from([(String::from("test"), Value::int(42))]))
+            Value::dictionary(BTreeMap::from([(Vec::from("test"), Value::int(42))]))
         )
     }
 
@@ -237,7 +249,7 @@ mod test_decoder {
 #[derive(PartialEq, Debug)]
 pub enum Token {
     Int(isize),
-    String(String),
+    String(ByteString),
     BeginList,
     BeginDict, // Cumberbatch
     EndOfObj,
@@ -245,7 +257,7 @@ pub enum Token {
 }
 
 /// expects string token
-fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usize), DecoderError> {
+fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usize), DecodeError> {
     let i = match buf.iter().position(|x| *x == b':') {
         Some(i) => i,
         None => return Ok((None, 0)),
@@ -254,12 +266,12 @@ fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usize), DecoderError> {
     // 9_999_999 - 10 MB string, too large
     // NOTE: maybe i want to configure it
     if i > 7 {
-        return Err(DecoderError::ValueTooLarge);
+        return Err(DecodeError::ValueTooLarge);
     }
 
     let len = match atoi::atoi(&buf[..i]) {
         Some(len) => len,
-        None => return Err(DecoderError::WrongSyntax),
+        None => return Err(DecodeError::InvalidSyntax),
     };
 
     if buf.len() - i + 1 < len {
@@ -267,14 +279,12 @@ fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usize), DecoderError> {
     }
 
     Ok((
-        Some(Token::String(
-            String::from_utf8(buf[i + 1..i + 1 + len].to_vec()).unwrap(),
-        )),
+        Some(Token::String(buf[i + 1..i + 1 + len].to_vec())),
         i + len + 1,
-    )) // FIXME:
+    ))
 }
 
-pub fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize), DecoderError> {
+pub fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize), DecodeError> {
     let i = match buf.iter().position(|x| *x == b'e') {
         Some(i) => i,
         None => return Ok((None, 0)),
@@ -282,12 +292,12 @@ pub fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize), DecoderError> {
 
     // not including i and e
     if buf.len() - 2 > 12 {
-        return Err(DecoderError::ValueTooLarge);
+        return Err(DecodeError::ValueTooLarge);
     }
 
     match atoi::atoi(&buf[1..i]) {
         Some(n) => Ok((Some(Token::Int(n)), i + 1)),
-        None => Err(DecoderError::WrongSyntax),
+        None => Err(DecodeError::InvalidSyntax),
     }
 }
 
@@ -300,7 +310,7 @@ mod test_parsers {
         let buf = b"4:test";
         assert_eq!(
             parse_string(buf).unwrap(),
-            (Some(Token::String(String::from("test"))), 6 as usize)
+            (Some(Token::String(Vec::from("test"))), 6 as usize)
         )
     }
 
