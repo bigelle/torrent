@@ -179,7 +179,7 @@ where
 }
 
 #[cfg(test)]
-mod test_decoder {
+mod test_decoder_return_values {
     use std::collections::BTreeMap;
 
     use super::*;
@@ -389,5 +389,54 @@ mod test_decoder {
             dec.decode(),
             Err(DecodeError::InvalidStructure(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod test_decoder {
+    use super::*;
+    use std::{
+        fs,
+        io::{self, BufReader, Read},
+        path::Path,
+    };
+
+    struct SlowReader<R: Read> {
+        inner: R,
+        limit: usize,
+    }
+
+    impl<R: Read> Read for SlowReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let max_to_read = std::cmp::min(buf.len(), self.limit);
+            self.inner.read(&mut buf[..max_to_read])
+        }
+    }
+
+    #[test]
+    fn test_slow_stream_decoding() {
+        let fixtures_dir = Path::new("../test_data/fixtures");
+
+        let entries = fs::read_dir(fixtures_dir).expect("Failed to read fixtures directory");
+
+        for entry in entries {
+            let entry = entry.unwrap();
+            let path = entry.path();
+
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("torrent") {
+                println!("Testing fixture: {:?}", path);
+
+                let data = fs::read(&path).expect("Failed to read file");
+                let src = BufReader::new(SlowReader {
+                    inner: &data[..],
+                    limit: 4,
+                });
+
+                let mut dec = Decoder::new(src);
+                let result = dec.decode();
+
+                assert!(result.is_ok(), "Failed to decode fixture: {:?}", path);
+            }
+        }
     }
 }

@@ -28,12 +28,12 @@ pub(in crate::bencode) fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usi
         return Err(DecodeError::ValueTooLarge);
     }
 
-    let len = match atoi::atoi(&buf[..i]) {
+    let len = match atoi::atoi::<usize>(&buf[..i]) {
         Some(len) => len,
         None => return Err(DecodeError::InvalidSyntax),
     };
 
-    if buf.len() - i + 1 < len {
+    if buf.len() < len + i + 1 {
         return Ok((None, 0));
     }
 
