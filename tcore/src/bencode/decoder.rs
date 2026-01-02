@@ -3,6 +3,8 @@ use std::io::{self, BufRead};
 use bytes::{Buf, BytesMut};
 use thiserror::Error;
 
+use crate::bencode::stack::StructureError;
+
 use super::parser;
 use super::parser::Token;
 use super::stack::Stack;
@@ -21,14 +23,14 @@ where
 pub enum DecodeError {
     #[error("invalid bencode syntax")]
     InvalidSyntax,
+    #[error("invalid object structure: {0}")]
+    InvalidStructure(#[from] StructureError),
     #[error("bencoded value is too large")]
     ValueTooLarge,
     #[error("unable to read file: {0}")]
     Io(#[from] io::Error),
     #[error("unexpected EOF")]
     UnexpectedEof,
-    #[error("pushing {0} instead of string as dictionary key")]
-    PushToDictError(Value),
 }
 
 impl PartialEq for DecodeError {
@@ -77,7 +79,7 @@ where
                                     return Ok(v);
                                 }
                             }
-                            Err(e) => return Err(DecodeError::PushToDictError(e.0)),
+                            Err(e) => return Err(DecodeError::InvalidStructure(e)),
                         },
                         Token::String(v) => match self.stack.push_value(Value::String(v)) {
                             Ok(returned) => {
@@ -85,7 +87,7 @@ where
                                     return Ok(v);
                                 }
                             }
-                            Err(e) => return Err(DecodeError::PushToDictError(e.0)),
+                            Err(e) => return Err(DecodeError::InvalidStructure(e)),
                         },
                         Token::BeginList => {
                             self.stack.push_list();
@@ -99,7 +101,7 @@ where
                                     return Ok(v);
                                 }
                             }
-                            Err(e) => return Err(DecodeError::PushToDictError(e.0)),
+                            Err(e) => return Err(DecodeError::InvalidStructure(e)),
                         },
                         Token::Invalid => return Err(DecodeError::InvalidSyntax),
                     };
@@ -204,6 +206,32 @@ mod test_decoder {
         assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
     }
 
+    #[test]
+    fn string_valid_binary_bytes() {
+        let src = b"3:\x00\x01\x02";
+        let mut dec = Decoder::new(&src[..]);
+        let val = dec.decode().unwrap();
+        assert_eq!(val, Value::string("\x00\x01\x02"));
+        let Value::String(str) = val else {
+            panic!("expected string, got {val}")
+        };
+        assert_eq!(str.len(), 3);
+    }
+
+    #[test]
+    fn string_error_too_big() {
+        let mut src: Vec<u8> = Vec::new();
+        for _ in 0..100 {
+            src.push(b'9');
+        }
+        src.push(b':');
+        for _ in 0..100 {
+            src.push(b'a');
+        }
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::ValueTooLarge)));
+    }
+
     // INTEGERS:
     #[test]
     fn int_valid_only_zero() {
@@ -252,6 +280,13 @@ mod test_decoder {
         let src = b"i42";
         let mut dec = Decoder::new(&src[..]);
         assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
+    }
+
+    #[test]
+    fn int_error_too_big() {
+        let src = b"i99999999999999999999999999999999999999999999999999999999999999999999e";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::ValueTooLarge)));
     }
 
     // LISTS:
@@ -340,6 +375,19 @@ mod test_decoder {
     fn dict_error_not_string_key() {
         let src = b"di42e4:teste";
         let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::PushToDictError(_))));
+        assert!(matches!(
+            dec.decode(),
+            Err(DecodeError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn dict_error_orphaned_key() {
+        let src = b"d4:teste";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(
+            dec.decode(),
+            Err(DecodeError::InvalidStructure(_))
+        ));
     }
 }

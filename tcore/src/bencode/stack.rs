@@ -8,9 +8,13 @@ pub struct Stack {
     stack: Vec<Container>,
 }
 
-#[derive(Debug, Error)]
-#[error("can't push not-string value to a dictionary")]
-pub struct PushToDictError(pub Value);
+#[derive(PartialEq, Debug, Error)]
+pub enum StructureError {
+    #[error("expected string as a key in dictionary, got {0}")]
+    PushToDictError(Value),
+    #[error("dictionary key has no value")]
+    OrphanedKey,
+}
 
 impl Stack {
     pub fn new() -> Stack {
@@ -18,7 +22,7 @@ impl Stack {
     }
 
     /// If stack is empty, returns the value back
-    pub fn push_value(&mut self, v: Value) -> Result<Option<Value>, PushToDictError> {
+    pub fn push_value(&mut self, v: Value) -> Result<Option<Value>, StructureError> {
         if let Some(top) = self.stack.last_mut() {
             if let Err(e) = top.push_value(v) {
                 return Err(e);
@@ -38,9 +42,9 @@ impl Stack {
     }
 
     /// Pops the top container from the stack, and if it was the last item on stack, returns it.
-    pub fn pop_container(&mut self) -> Result<Option<Value>, PushToDictError> {
+    pub fn pop_container(&mut self) -> Result<Option<Value>, StructureError> {
         match self.stack.pop() {
-            Some(top) => self.push_value(top.to_value()),
+            Some(top) => self.push_value(top.to_value()?),
             None => Ok(None),
         }
     }
@@ -64,17 +68,17 @@ impl Container {
         Container::Dict(DictBuilder::new())
     }
 
-    fn push_value(&mut self, v: Value) -> Result<(), PushToDictError> {
+    fn push_value(&mut self, v: Value) -> Result<(), StructureError> {
         match self {
             Self::List(l) => Ok(l.push(v)),
             Self::Dict(d) => d.insert(v),
         }
     }
 
-    fn to_value(self) -> Value {
+    fn to_value(self) -> Result<Value, StructureError> {
         match self {
-            Self::List(l) => Value::list(l),
-            Self::Dict(d) => Value::dictionary(d.finish()),
+            Self::List(l) => Ok(Value::list(l)),
+            Self::Dict(d) => Ok(Value::dictionary(d.finish()?)),
         }
     }
 }
@@ -92,14 +96,14 @@ impl DictBuilder {
         }
     }
 
-    fn insert(&mut self, v: Value) -> Result<(), PushToDictError> {
+    fn insert(&mut self, v: Value) -> Result<(), StructureError> {
         match self.pending_key.take() {
             None => {
                 if let Value::String(s) = v {
                     self.pending_key = Some(s);
                     Ok(())
                 } else {
-                    Err(PushToDictError(v))
+                    Err(StructureError::PushToDictError(v))
                 }
             }
             Some(k) => {
@@ -109,7 +113,10 @@ impl DictBuilder {
         }
     }
 
-    fn finish(self) -> BTreeMap<ByteString, Value> {
-        self.dict
+    fn finish(self) -> Result<BTreeMap<ByteString, Value>, StructureError> {
+        if self.pending_key != None {
+            return Err(StructureError::OrphanedKey);
+        }
+        Ok(self.dict)
     }
 }
