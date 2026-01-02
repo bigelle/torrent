@@ -1,48 +1,12 @@
-#![allow(unused)] // FIXME:
+use std::io::{self, BufRead};
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    error::Error,
-    io::{self, BufRead, ErrorKind},
-};
-
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BytesMut};
 use thiserror::Error;
 
-use crate::bencode::stack::{self, Stack};
-
-/// ByteString - bencoded string as byte sequence
-pub type ByteString = Vec<u8>;
-
-#[derive(PartialEq, Debug)]
-pub enum Value {
-    Int(isize),
-    String(ByteString),
-    List(Vec<Box<Value>>),
-    Dictionary(BTreeMap<ByteString, Box<Value>>),
-}
-
-impl Value {
-    pub fn int(i: isize) -> Self {
-        Value::Int(i)
-    }
-
-    pub fn string<A: Into<ByteString>>(v: A) -> Self {
-        Value::String(v.into())
-    }
-
-    pub fn string_ref<A: AsRef<[u8]>>(v: A) -> Self {
-        Value::String(v.as_ref().to_vec())
-    }
-
-    pub fn list(v: Vec<Value>) -> Self {
-        Value::List(v.into_iter().map(Box::new).collect())
-    }
-
-    pub fn dictionary(v: BTreeMap<ByteString, Value>) -> Self {
-        Value::Dictionary(v.into_iter().map(|(k, v)| (k, Box::new(v))).collect())
-    }
-}
+use super::parser;
+use super::parser::Token;
+use super::stack::Stack;
+use super::value::Value;
 
 pub struct Decoder<T>
 where
@@ -50,13 +14,7 @@ where
 {
     src: T,
     buf: BytesMut,
-    state: DecoderState,
     stack: Stack,
-}
-
-enum DecoderState {
-    Running,
-    NeedRefill,
 }
 
 #[derive(Error, Debug)]
@@ -69,6 +27,21 @@ pub enum DecodeError {
     Io(#[from] io::Error),
     #[error("unexpected EOF")]
     UnexpectedEof,
+    #[error("pushing {0} instead of string as dictionary key")]
+    PushToDictError(Value),
+}
+
+impl PartialEq for DecodeError {
+    fn eq(&self, other: &Self) -> bool {
+        use DecodeError::*;
+        match (self, other) {
+            (InvalidSyntax, InvalidSyntax) => true,
+            (ValueTooLarge, ValueTooLarge) => true,
+            (Io(_), Io(_)) => true, // сравниваем только, что это Io, не сам io::Error
+            (UnexpectedEof, UnexpectedEof) => true,
+            _ => false,
+        }
+    }
 }
 
 impl<T> Decoder<T>
@@ -79,7 +52,6 @@ where
         Decoder {
             src: src,
             buf: BytesMut::with_capacity(4096),
-            state: DecoderState::NeedRefill,
             stack: Stack::new(),
         }
     }
@@ -88,61 +60,64 @@ where
         Decoder {
             src: src,
             buf: BytesMut::with_capacity(cap),
-            state: DecoderState::NeedRefill,
             stack: Stack::new(),
         }
     }
 
     pub fn decode(&mut self) -> Result<Value, DecodeError> {
         loop {
-            match self.state {
-                DecoderState::NeedRefill => {
-                    let len = self.refill()?;
-                    if len == 0 {
-                        return Err(DecodeError::UnexpectedEof);
-                    }
-                    self.state = DecoderState::Running;
-                }
+            let maybe_token = self.next_token()?;
 
-                DecoderState::Running => {
-                    let maybe_token = self.next()?;
-
-                    match maybe_token {
-                        Some(token) => {
-                            match token {
-                                Token::Int(v) => {
-                                    if let Some(v) = self.stack.push_value(Value::Int(v)) {
-                                        return Ok(v);
-                                    }
+            match maybe_token {
+                Some(token) => {
+                    match token {
+                        Token::Int(v) => match self.stack.push_value(Value::Int(v)) {
+                            Ok(returned) => {
+                                if let Some(v) = returned {
+                                    return Ok(v);
                                 }
-                                Token::String(v) => {
-                                    if let Some(v) = self.stack.push_value(Value::String(v)) {
-                                        return Ok(v);
-                                    }
+                            }
+                            Err(e) => return Err(DecodeError::PushToDictError(e.0)),
+                        },
+                        Token::String(v) => match self.stack.push_value(Value::String(v)) {
+                            Ok(returned) => {
+                                if let Some(v) = returned {
+                                    return Ok(v);
                                 }
-                                Token::BeginList => {
-                                    self.stack.push_list();
-                                }
-                                Token::BeginDict => {
-                                    self.stack.push_dict();
-                                }
-                                Token::EndOfObj => {
-                                    if let Some(v) = self.stack.pop_container() {
-                                        return Ok(v);
-                                    }
-                                }
-                                Token::Invalid => return Err(DecodeError::InvalidSyntax),
-                            };
+                            }
+                            Err(e) => return Err(DecodeError::PushToDictError(e.0)),
+                        },
+                        Token::BeginList => {
+                            self.stack.push_list();
                         }
-                        None => self.state = DecoderState::NeedRefill,
-                    }
+                        Token::BeginDict => {
+                            self.stack.push_dict();
+                        }
+                        Token::EndOfObj => match self.stack.pop_container() {
+                            Ok(returned) => {
+                                if let Some(v) = returned {
+                                    return Ok(v);
+                                }
+                            }
+                            Err(e) => return Err(DecodeError::PushToDictError(e.0)),
+                        },
+                        Token::Invalid => return Err(DecodeError::InvalidSyntax),
+                    };
                 }
+                None => match self.refill() {
+                    Ok(len) => {
+                        if len == 0 {
+                            return Err(DecodeError::UnexpectedEof);
+                        }
+                    }
+                    Err(e) => return Err(e),
+                },
             }
         }
     }
 
     /// returns None if it needs more bytes
-    pub fn next<'a>(&mut self) -> Result<Option<Token>, DecodeError> {
+    pub fn next_token(&mut self) -> Result<Option<Token>, DecodeError> {
         let b = match self.buf.first() {
             Some(b) => b,
             None => return Ok(None),
@@ -150,7 +125,7 @@ where
 
         match b {
             b'i' => {
-                let (maybe_token, len) = match parse_int(&self.buf) {
+                let (maybe_token, len) = match parser::parse_int(&self.buf) {
                     Ok(ok) => ok,
                     Err(e) => return Err(e),
                 };
@@ -158,7 +133,7 @@ where
                 Ok(maybe_token)
             }
             b'0'..=b'9' => {
-                let (maybe_token, len) = match parse_string(&self.buf) {
+                let (maybe_token, len) = match parser::parse_string(&self.buf) {
                     Ok(ok) => ok,
                     Err(e) => return Err(e),
                 };
@@ -181,7 +156,7 @@ where
         }
     }
 
-    fn refill(&mut self) -> Result<usize, DecodeError> {
+    pub fn refill(&mut self) -> Result<usize, DecodeError> {
         let tmp = match self.src.fill_buf() {
             Ok(tmp) => tmp,
             Err(e) => return Err(DecodeError::Io(e)),
@@ -203,36 +178,125 @@ where
 
 #[cfg(test)]
 mod test_decoder {
+    use std::collections::BTreeMap;
+
     use super::*;
 
+    // STRINGS:
     #[test]
-    fn valid_string() {
+    fn string_valid() {
         let src = b"4:test";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::string(Vec::from("test")));
+        assert_eq!(dec.decode().unwrap(), Value::string("test"));
     }
 
     #[test]
-    fn valid_int() {
+    fn string_valid_empty() {
+        let src = b"0:";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(dec.decode().unwrap(), Value::string(""));
+    }
+
+    #[test]
+    fn string_error_leading_zero_in_length() {
+        let src = b"04:test";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
+    }
+
+    // INTEGERS:
+    #[test]
+    fn int_valid_only_zero() {
+        let src = b"i0e";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(dec.decode().unwrap(), Value::int(0));
+    }
+
+    #[test]
+    fn int_valid_positive() {
         let src = b"i42e";
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(dec.decode().unwrap(), Value::int(42));
     }
 
     #[test]
-    fn valid_flat_list() {
+    fn int_valid_negative() {
+        let src = b"i-42e";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(dec.decode().unwrap(), Value::int(-42));
+    }
+
+    #[test]
+    fn int_error_invalid_syntax() {
+        let src = b"i4a2e";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(dec.decode(), Err(DecodeError::InvalidSyntax));
+    }
+
+    #[test]
+    fn int_error_leading_zero() {
+        let src = b"i042e";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
+    }
+
+    #[test]
+    fn int_error_negative_zero() {
+        let src = b"i-0e";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
+    }
+
+    #[test]
+    fn int_error_unexpected_eof() {
+        let src = b"i42";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
+    }
+
+    // LISTS:
+    #[test]
+    fn list_valid_flat() {
         let src = b"li42e4:teste";
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(
             dec.decode().unwrap(),
-            Value::list(vec![Value::int(42), Value::string(Vec::from("test"))])
+            Value::list(vec![Value::int(42), Value::string("test")])
         );
     }
 
-    //TODO: test nested lists
+    #[test]
+    fn list_valid_empty() {
+        let src = b"le";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(dec.decode().unwrap(), Value::list(Vec::new()));
+    }
 
     #[test]
-    fn valid_flat_dict() {
+    fn list_valid_with_nested_objects() {
+        let src = b"li42e4:testd3:cow3:mooel3:egg4:spamee";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(
+            dec.decode().unwrap(),
+            Value::list(vec![
+                42.into(),
+                "test".into(),
+                Value::dictionary(BTreeMap::from([("cow".into(), "moo".into(),)])),
+                Value::list(vec!["egg".into(), "spam".into()])
+            ])
+        );
+    }
+
+    #[test]
+    fn list_error_unexpected_eof() {
+        let src = b"li42e4:test";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
+    }
+
+    // DICTS:
+    #[test]
+    fn dict_valid_flat() {
         let src = b"d4:testi42ee";
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(
@@ -241,84 +305,41 @@ mod test_decoder {
         )
     }
 
-    //TODO: test nested dicts
-
-    //TODO: test nested lists and dicts combined
-}
-
-#[derive(PartialEq, Debug)]
-pub enum Token {
-    Int(isize),
-    String(ByteString),
-    BeginList,
-    BeginDict, // Cumberbatch
-    EndOfObj,
-    Invalid,
-}
-
-/// expects string token
-fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usize), DecodeError> {
-    let i = match buf.iter().position(|x| *x == b':') {
-        Some(i) => i,
-        None => return Ok((None, 0)),
-    };
-
-    // 9_999_999 - 10 MB string, too large
-    // NOTE: maybe i want to configure it
-    if i > 7 {
-        return Err(DecodeError::ValueTooLarge);
+    #[test]
+    fn dict_valid_empty() {
+        let src = b"de";
+        let mut dec = Decoder::new(&src[..]);
+        assert_eq!(dec.decode().unwrap(), Value::dictionary(BTreeMap::new()))
     }
-
-    let len = match atoi::atoi(&buf[..i]) {
-        Some(len) => len,
-        None => return Err(DecodeError::InvalidSyntax),
-    };
-
-    if buf.len() - i + 1 < len {
-        return Ok((None, 0));
-    }
-
-    Ok((
-        Some(Token::String(buf[i + 1..i + 1 + len].to_vec())),
-        i + len + 1,
-    ))
-}
-
-pub fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize), DecodeError> {
-    let i = match buf.iter().position(|x| *x == b'e') {
-        Some(i) => i,
-        None => return Ok((None, 0)),
-    };
-
-    // not including i and e
-    if buf.len() - 2 > 12 {
-        return Err(DecodeError::ValueTooLarge);
-    }
-
-    match atoi::atoi(&buf[1..i]) {
-        Some(n) => Ok((Some(Token::Int(n)), i + 1)),
-        None => Err(DecodeError::InvalidSyntax),
-    }
-}
-
-#[cfg(test)]
-mod test_parsers {
-    use super::*;
 
     #[test]
-    fn valid_string() {
-        let buf = b"4:test";
+    fn dict_valid_with_nested_objects() {
+        let src = b"d4:testi42e4:listl3:cow3:mooe4:dictd3:egg4:spamee";
+        let mut dec = Decoder::new(&src[..]);
         assert_eq!(
-            parse_string(buf).unwrap(),
-            (Some(Token::String(Vec::from("test"))), 6 as usize)
-        )
+            dec.decode().unwrap(),
+            Value::dictionary(BTreeMap::from([
+                ("test".into(), 42.into()),
+                ("list".into(), Value::list(vec!["cow".into(), "moo".into()])),
+                (
+                    "dict".into(),
+                    Value::dictionary(BTreeMap::from([("egg".into(), "spam".into())]))
+                )
+            ]))
+        );
     }
 
     #[test]
-    fn valid_int() {
-        let buf = b"i42e";
-        assert_eq!(parse_int(buf).unwrap(), (Some(Token::Int(42)), 4))
+    fn dict_error_unexpected_eof() {
+        let src = b"d4:testi42e4:listl3:cow3:mooe4:dictd3:egg4:spame";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
     }
 
-    //TODO: test for failing cases
+    #[test]
+    fn dict_error_not_string_key() {
+        let src = b"di42e4:teste";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(dec.decode(), Err(DecodeError::PushToDictError(_))));
+    }
 }

@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
 
-use crate::bencode::decoder::ByteString;
-use crate::bencode::decoder::Value;
+use thiserror::Error;
+
+use super::value::{ByteString, Value};
 
 pub struct Stack {
     stack: Vec<Container>,
 }
+
+#[derive(Debug, Error)]
+#[error("can't push not-string value to a dictionary")]
+pub struct PushToDictError(pub Value);
 
 impl Stack {
     pub fn new() -> Stack {
@@ -13,12 +18,14 @@ impl Stack {
     }
 
     /// If stack is empty, returns the value back
-    pub fn push_value(&mut self, v: Value) -> Option<Value> {
+    pub fn push_value(&mut self, v: Value) -> Result<Option<Value>, PushToDictError> {
         if let Some(top) = self.stack.last_mut() {
-            top.insert(v);
-            None
+            if let Err(e) = top.push_value(v) {
+                return Err(e);
+            }
+            Ok(None)
         } else {
-            Some(v)
+            Ok(Some(v))
         }
     }
 
@@ -31,56 +38,44 @@ impl Stack {
     }
 
     /// Pops the top container from the stack, and if it was the last item on stack, returns it.
-    pub fn pop_container(&mut self) -> Option<Value> {
-        let top = self.stack.pop()?;
-        self.push_value(top.to_value())
+    pub fn pop_container(&mut self) -> Result<Option<Value>, PushToDictError> {
+        match self.stack.pop() {
+            Some(top) => self.push_value(top.to_value()),
+            None => Ok(None),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
     }
 }
 
 enum Container {
-    List(ListBuilder),
+    List(Vec<Value>),
     Dict(DictBuilder),
 }
 
 impl Container {
     fn new_list() -> Container {
-        Container::List(ListBuilder::new())
+        Container::List(Vec::new())
     }
 
     fn new_dict() -> Container {
         Container::Dict(DictBuilder::new())
     }
 
-    fn insert(&mut self, v: Value) {
+    fn push_value(&mut self, v: Value) -> Result<(), PushToDictError> {
         match self {
-            Self::List(l) => l.insert(v),
+            Self::List(l) => Ok(l.push(v)),
             Self::Dict(d) => d.insert(v),
         }
     }
 
     fn to_value(self) -> Value {
         match self {
-            Self::List(l) => Value::list(l.finish()),
+            Self::List(l) => Value::list(l),
             Self::Dict(d) => Value::dictionary(d.finish()),
         }
-    }
-}
-
-struct ListBuilder {
-    list: Vec<Value>,
-}
-
-impl ListBuilder {
-    fn new() -> ListBuilder {
-        ListBuilder { list: Vec::new() }
-    }
-
-    fn insert(&mut self, v: Value) {
-        self.list.push(v);
-    }
-
-    fn finish(self) -> Vec<Value> {
-        self.list
     }
 }
 
@@ -97,18 +92,19 @@ impl DictBuilder {
         }
     }
 
-    fn insert(&mut self, v: Value) {
+    fn insert(&mut self, v: Value) -> Result<(), PushToDictError> {
         match self.pending_key.take() {
             None => {
                 if let Value::String(s) = v {
                     self.pending_key = Some(s);
+                    Ok(())
                 } else {
-                    panic!("inserting non-string value as a key in dictionary");
-                    // FIXME: maybe should not panic
+                    Err(PushToDictError(v))
                 }
             }
             Some(k) => {
                 self.dict.insert(k, v);
+                Ok(())
             }
         }
     }
