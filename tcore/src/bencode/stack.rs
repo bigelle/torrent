@@ -4,14 +4,15 @@ use thiserror::Error;
 
 use super::value::{ByteString, Value};
 
+#[derive(Debug)]
 pub struct Stack {
     stack: Vec<Container>,
 }
 
 #[derive(PartialEq, Debug, Error)]
 pub enum StructureError {
-    #[error("expected string as a key in dictionary, got {0}")]
-    PushToDictError(Value),
+    #[error("expected string as a key in dictionary, got SOMETHING FFUICKING ELSE")]//FIXME:
+    PushToDictError,
     #[error("dictionary key has no value")]
     OrphanedKey,
 }
@@ -54,6 +55,7 @@ impl Stack {
     }
 }
 
+#[derive(Debug)]
 enum Container {
     List(Vec<Value>),
     Dict(DictBuilder),
@@ -77,12 +79,13 @@ impl Container {
 
     fn to_value(self) -> Result<Value, StructureError> {
         match self {
-            Self::List(l) => Ok(Value::list(l)),
-            Self::Dict(d) => Ok(Value::dictionary(d.finish()?)),
+            Self::List(l) => Ok(l.into()),
+            Self::Dict(d) => Ok(d.finish()?.into()),
         }
     }
 }
 
+#[derive(Debug)]
 struct DictBuilder {
     dict: BTreeMap<ByteString, Value>,
     pending_key: Option<ByteString>,
@@ -103,7 +106,7 @@ impl DictBuilder {
                     self.pending_key = Some(s);
                     Ok(())
                 } else {
-                    Err(StructureError::PushToDictError(v))
+                    Err(StructureError::PushToDictError)
                 }
             }
             Some(k) => {

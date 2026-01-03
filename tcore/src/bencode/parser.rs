@@ -38,7 +38,7 @@ pub(in crate::bencode) fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usi
     }
 
     Ok((
-        Some(Token::String(buf[i + 1..i + 1 + len].to_vec())),
+        Some(Token::String(buf[i + 1..i + 1 + len].into())),
         i + len + 1,
     ))
 }
@@ -77,6 +77,8 @@ pub(in crate::bencode) fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize)
 
 #[cfg(test)]
 mod test_parsers {
+    use std::borrow::Cow;
+
     use super::*;
 
     #[test]
@@ -84,7 +86,7 @@ mod test_parsers {
         let buf = b"4:test";
         assert_eq!(
             parse_string(buf).unwrap(),
-            (Some(Token::String(Vec::from("test"))), 6 as usize)
+            (Some(Token::String(b"test".to_vec())), 6 as usize)
         )
     }
 

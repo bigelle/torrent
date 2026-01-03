@@ -1,9 +1,9 @@
 use std::io::{self, BufRead};
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use thiserror::Error;
 
-use crate::bencode::stack::StructureError;
+use super::stack::StructureError;
 
 use super::parser;
 use super::parser::Token;
@@ -31,6 +31,8 @@ pub enum DecodeError {
     Io(#[from] io::Error),
     #[error("unexpected EOF")]
     UnexpectedEof,
+    #[error("unused trailing data in buffer")]
+    TrailingDataInBuffer,
 }
 
 impl PartialEq for DecodeError {
@@ -39,7 +41,7 @@ impl PartialEq for DecodeError {
         match (self, other) {
             (InvalidSyntax, InvalidSyntax) => true,
             (ValueTooLarge, ValueTooLarge) => true,
-            (Io(_), Io(_)) => true, // сравниваем только, что это Io, не сам io::Error
+            (Io(_), Io(_)) => true,
             (UnexpectedEof, UnexpectedEof) => true,
             _ => false,
         }
@@ -67,7 +69,7 @@ where
     }
 
     pub fn decode(&mut self) -> Result<Value, DecodeError> {
-        loop {
+        let result = loop {
             let maybe_token = self.next_token()?;
 
             match maybe_token {
@@ -76,46 +78,56 @@ where
                         Token::Int(v) => match self.stack.push_value(Value::Int(v)) {
                             Ok(returned) => {
                                 if let Some(v) = returned {
-                                    return Ok(v);
+                                    break v;
                                 }
                             }
                             Err(e) => return Err(DecodeError::InvalidStructure(e)),
                         },
+
                         Token::String(v) => match self.stack.push_value(Value::String(v)) {
                             Ok(returned) => {
                                 if let Some(v) = returned {
-                                    return Ok(v);
+                                    break v;
                                 }
                             }
                             Err(e) => return Err(DecodeError::InvalidStructure(e)),
                         },
+
                         Token::BeginList => {
                             self.stack.push_list();
                         }
+
                         Token::BeginDict => {
                             self.stack.push_dict();
                         }
+
                         Token::EndOfObj => match self.stack.pop_container() {
                             Ok(returned) => {
                                 if let Some(v) = returned {
-                                    return Ok(v);
+                                    break v;
                                 }
                             }
                             Err(e) => return Err(DecodeError::InvalidStructure(e)),
                         },
+
                         Token::Invalid => return Err(DecodeError::InvalidSyntax),
                     };
                 }
-                None => match self.refill() {
-                    Ok(len) => {
-                        if len == 0 {
-                            return Err(DecodeError::UnexpectedEof);
-                        }
+
+                None => {
+                    let len = self.refill()?;
+                    if len == 0 {
+                        return Err(DecodeError::UnexpectedEof);
                     }
-                    Err(e) => return Err(e),
-                },
+                }
             }
+        };
+
+        if !self.buf.is_empty() {
+            return Err(DecodeError::TrailingDataInBuffer);
         }
+
+        return Ok(result);
     }
 
     /// returns None if it needs more bytes
@@ -131,7 +143,7 @@ where
                     Ok(ok) => ok,
                     Err(e) => return Err(e),
                 };
-                self.advance_buff(len);
+                self.advance_buf(len);
                 Ok(maybe_token)
             }
             b'0'..=b'9' => {
@@ -139,19 +151,19 @@ where
                     Ok(ok) => ok,
                     Err(e) => return Err(e),
                 };
-                self.advance_buff(len);
+                self.advance_buf(len);
                 Ok(maybe_token)
             }
             b'l' => {
-                self.advance_buff(1);
+                self.advance_buf(1);
                 Ok(Some(Token::BeginList))
             }
             b'd' => {
-                self.advance_buff(1);
+                self.advance_buf(1);
                 Ok(Some(Token::BeginDict))
             }
             b'e' => {
-                self.advance_buff(1);
+                self.advance_buf(1);
                 Ok(Some(Token::EndOfObj))
             }
             _ => Ok(Some(Token::Invalid)),
@@ -159,19 +171,24 @@ where
     }
 
     pub fn refill(&mut self) -> Result<usize, DecodeError> {
-        let tmp = match self.src.fill_buf() {
-            Ok(tmp) => tmp,
-            Err(e) => return Err(DecodeError::Io(e)),
-        };
-        let len = tmp.len();
-        if len > 0 {
-            self.buf.extend_from_slice(tmp);
-            self.src.consume(len);
+        let available = self.src.fill_buf()?;
+
+        if available.is_empty() {
+            return Ok(0);
         }
-        Ok(len)
+
+        let size = available.len();
+
+        self.buf.reserve(size);
+
+        self.buf.put_slice(available);
+
+        self.src.consume(size);
+
+        Ok(size)
     }
 
-    fn advance_buff(&mut self, n: usize) {
+    fn advance_buf(&mut self, n: usize) {
         if self.buf.len() >= n {
             self.buf.advance(n);
         }
@@ -184,19 +201,29 @@ mod test_decoder_return_values {
 
     use super::*;
 
+    #[test]
+    fn source_error_junk_trail_in_buffer() {
+        let src = b"li42e4:teste3:cow";
+        let mut dec = Decoder::new(&src[..]);
+        assert!(matches!(
+            dec.decode(),
+            Err(DecodeError::TrailingDataInBuffer)
+        ));
+    }
+
     // STRINGS:
     #[test]
     fn string_valid() {
         let src = b"4:test";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::string("test"));
+        assert_eq!(dec.decode().unwrap(), &b"test"[..]);
     }
 
     #[test]
     fn string_valid_empty() {
         let src = b"0:";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::string(""));
+        assert_eq!(dec.decode().unwrap(), &b""[..]);
     }
 
     #[test]
@@ -211,7 +238,7 @@ mod test_decoder_return_values {
         let src = b"3:\x00\x01\x02";
         let mut dec = Decoder::new(&src[..]);
         let val = dec.decode().unwrap();
-        assert_eq!(val, Value::string("\x00\x01\x02"));
+        assert_eq!(val, &b"\x00\x01\x02"[..]);
         let Value::String(str) = val else {
             panic!("expected string, got {val}")
         };
@@ -237,21 +264,21 @@ mod test_decoder_return_values {
     fn int_valid_only_zero() {
         let src = b"i0e";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::int(0));
+        assert_eq!(dec.decode().unwrap(), 0);
     }
 
     #[test]
     fn int_valid_positive() {
         let src = b"i42e";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::int(42));
+        assert_eq!(dec.decode().unwrap(), 42);
     }
 
     #[test]
     fn int_valid_negative() {
         let src = b"i-42e";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::int(-42));
+        assert_eq!(dec.decode().unwrap(), -42);
     }
 
     #[test]
@@ -294,32 +321,32 @@ mod test_decoder_return_values {
     fn list_valid_flat() {
         let src = b"li42e4:teste";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(
-            dec.decode().unwrap(),
-            Value::list(vec![Value::int(42), Value::string("test")])
-        );
+
+        let expected: Value = vec![42.into(), "test".into()].into();
+        assert_eq!(dec.decode().unwrap(), expected);
     }
 
     #[test]
     fn list_valid_empty() {
         let src = b"le";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::list(Vec::new()));
+        assert_eq!(dec.decode().unwrap(), Vec::<Value>::new());
     }
 
     #[test]
     fn list_valid_with_nested_objects() {
         let src = b"li42e4:testd3:cow3:mooel3:egg4:spamee";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(
-            dec.decode().unwrap(),
-            Value::list(vec![
-                42.into(),
-                "test".into(),
-                Value::dictionary(BTreeMap::from([("cow".into(), "moo".into(),)])),
-                Value::list(vec!["egg".into(), "spam".into()])
-            ])
-        );
+
+        let expected: Value = vec![
+            42.into(),
+            "test".into(),
+            BTreeMap::from([(b"cow".into(), "moo".into())]).into(),
+            vec!["egg".into(), "spam".into()].into(),
+        ]
+        .into();
+
+        assert_eq!(dec.decode().unwrap(), expected);
     }
 
     #[test]
@@ -334,17 +361,18 @@ mod test_decoder_return_values {
     fn dict_valid_flat() {
         let src = b"d4:testi42ee";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(
-            dec.decode().unwrap(),
-            Value::dictionary(BTreeMap::from([(Vec::from("test"), Value::int(42))]))
-        )
+
+        let mut expected = BTreeMap::new();
+        expected.insert(b"test".into(), 42.into());
+
+        assert_eq!(dec.decode().unwrap(), expected,)
     }
 
     #[test]
     fn dict_valid_empty() {
         let src = b"de";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::dictionary(BTreeMap::new()))
+        assert_eq!(dec.decode().unwrap(), BTreeMap::new())
     }
 
     #[test]
@@ -353,14 +381,14 @@ mod test_decoder_return_values {
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(
             dec.decode().unwrap(),
-            Value::dictionary(BTreeMap::from([
-                ("test".into(), 42.into()),
-                ("list".into(), Value::list(vec!["cow".into(), "moo".into()])),
+            BTreeMap::from([
+                (b"test".into(), 42.into()),
+                (b"list".into(), vec!["cow".into(), "moo".into()].into()),
                 (
-                    "dict".into(),
-                    Value::dictionary(BTreeMap::from([("egg".into(), "spam".into())]))
+                    b"dict".into(),
+                    BTreeMap::from([(b"egg".into(), "spam".into())]).into()
                 )
-            ]))
+            ])
         );
     }
 
@@ -419,6 +447,7 @@ mod test_decoder {
 
         let entries = fs::read_dir(fixtures_dir).expect("Failed to read fixtures directory");
 
+        let mut not_failed = true;
         for entry in entries {
             let entry = entry.unwrap();
             let path = entry.path();
@@ -435,8 +464,32 @@ mod test_decoder {
                 let mut dec = Decoder::new(src);
                 let result = dec.decode();
 
-                assert!(result.is_ok(), "Failed to decode fixture: {:?}", path);
+                if !result.is_ok() {
+                    eprintln!(
+                        "Failed to decode fixture: {:?}, cause: {}",
+                        path,
+                        result.unwrap_err()
+                    );
+                    not_failed = false;
+                    continue;
+                }
             }
+
+            assert!(not_failed)
+        }
+    }
+
+    #[test]
+    fn test_huge_file() {
+        let _profiler = dhat::Profiler::new_heap();
+
+        let data = fs::read("../test_data/benchmarks/heavy.torrent").expect("file exists and can be read");
+
+        let mut dec = Decoder::new(&data[..]);
+        let result = dec.decode();
+
+        if !result.is_ok() {
+            panic!("Failed to decode fixture: {}", result.unwrap_err());
         }
     }
 }
