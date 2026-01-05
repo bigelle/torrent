@@ -8,7 +8,7 @@ pub enum Value {
     Int(i64),
     String(ByteString),
     List(Vec<Value>),
-    Dictionary(BTreeMap<ByteString, Value>),
+    Dictionary(Vec<(ByteString, Value)>),
 }
 
 impl Display for Value {
@@ -52,8 +52,8 @@ impl From<Vec<Value>> for Value {
     }
 }
 
-impl From<BTreeMap<ByteString, Value>> for Value {
-    fn from(value: BTreeMap<ByteString, Value>) -> Self {
+impl From<Vec<(ByteString, Value)>> for Value {
+    fn from(value: Vec<(ByteString, Value)>) -> Self {
         Self::Dictionary(value)
     }
 }
@@ -82,8 +82,3 @@ impl PartialEq<Vec<Value>> for Value {
     }
 }
 
-impl PartialEq<BTreeMap<ByteString, Value>> for Value {
-    fn eq(&self, other: &BTreeMap<ByteString, Value>) -> bool {
-        matches!(self, Self::Dictionary(d) if d == other)
-    }
-}

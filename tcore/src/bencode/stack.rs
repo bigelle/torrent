@@ -11,7 +11,7 @@ pub struct Stack {
 
 #[derive(PartialEq, Debug, Error)]
 pub enum StructureError {
-    #[error("expected string as a key in dictionary, got SOMETHING FFUICKING ELSE")]//FIXME:
+    #[error("expected string as a key in dictionary, got SOMETHING FFUICKING ELSE")] //FIXME:
     PushToDictError,
     #[error("dictionary key has no value")]
     OrphanedKey,
@@ -80,21 +80,21 @@ impl Container {
     fn to_value(self) -> Result<Value, StructureError> {
         match self {
             Self::List(l) => Ok(l.into()),
-            Self::Dict(d) => Ok(d.finish()?.into()),
+            Self::Dict(d) => Ok(Value::Dictionary(d.finish()?.into())),
         }
     }
 }
 
 #[derive(Debug)]
 struct DictBuilder {
-    dict: BTreeMap<ByteString, Value>,
+    dict: Vec<(ByteString, Value)>,
     pending_key: Option<ByteString>,
 }
 
 impl DictBuilder {
     fn new() -> DictBuilder {
         DictBuilder {
-            dict: BTreeMap::new(),
+            dict: Vec::new(),
             pending_key: None,
         }
     }
@@ -110,13 +110,13 @@ impl DictBuilder {
                 }
             }
             Some(k) => {
-                self.dict.insert(k, v);
+                self.dict.push((k, v));
                 Ok(())
             }
         }
     }
 
-    fn finish(self) -> Result<BTreeMap<ByteString, Value>, StructureError> {
+    fn finish(self) -> Result<Vec<(ByteString, Value)>, StructureError> {
         if self.pending_key != None {
             return Err(StructureError::OrphanedKey);
         }

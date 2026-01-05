@@ -1,10 +1,12 @@
-use crate::bencode::{DecodeError, value::ByteString};
+use crate::bencode::{
+    DecodeError,
+    value::{ByteString, Value},
+};
 use atoi::FromRadix10SignedChecked;
 
 #[derive(PartialEq, Debug)]
 pub enum Token {
-    Int(i64),
-    String(ByteString),
+    Primitive(Value),
     BeginList,
     BeginDict, // Cumberbatch
     EndOfObj,
@@ -38,7 +40,7 @@ pub(in crate::bencode) fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usi
     }
 
     Ok((
-        Some(Token::String(buf[i + 1..i + 1 + len].into())),
+        Some(Token::Primitive(buf[i + 1..i + 1 + len].into())),
         i + len + 1,
     ))
 }
@@ -69,7 +71,7 @@ pub(in crate::bencode) fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize)
             if len != i - 1 {
                 return Err(DecodeError::InvalidSyntax);
             }
-            Ok((Some(Token::Int(n)), i + 1))
+            Ok((Some(Token::Primitive(Value::Int(n))), i + 1))
         }
         None => Err(DecodeError::InvalidSyntax),
     }
@@ -77,7 +79,6 @@ pub(in crate::bencode) fn parse_int(buf: &[u8]) -> Result<(Option<Token>, usize)
 
 #[cfg(test)]
 mod test_parsers {
-    use std::borrow::Cow;
 
     use super::*;
 
@@ -86,14 +87,20 @@ mod test_parsers {
         let buf = b"4:test";
         assert_eq!(
             parse_string(buf).unwrap(),
-            (Some(Token::String(b"test".to_vec())), 6 as usize)
+            (
+                Some(Token::Primitive(Value::String(b"test".to_vec()))),
+                6 as usize
+            )
         )
     }
 
     #[test]
     fn valid_int() {
         let buf = b"i42e";
-        assert_eq!(parse_int(buf).unwrap(), (Some(Token::Int(42)), 4))
+        assert_eq!(
+            parse_int(buf).unwrap(),
+            (Some(Token::Primitive(Value::Int(42))), 4)
+        )
     }
 
     //TODO: test for failing cases

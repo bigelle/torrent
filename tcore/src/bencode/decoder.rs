@@ -75,16 +75,7 @@ where
             match maybe_token {
                 Some(token) => {
                     match token {
-                        Token::Int(v) => match self.stack.push_value(Value::Int(v)) {
-                            Ok(returned) => {
-                                if let Some(v) = returned {
-                                    break v;
-                                }
-                            }
-                            Err(e) => return Err(DecodeError::InvalidStructure(e)),
-                        },
-
-                        Token::String(v) => match self.stack.push_value(Value::String(v)) {
+                        Token::Primitive(v) => match self.stack.push_value(v) {
                             Ok(returned) => {
                                 if let Some(v) = returned {
                                     break v;
@@ -322,7 +313,7 @@ mod test_decoder_return_values {
         let src = b"li42e4:teste";
         let mut dec = Decoder::new(&src[..]);
 
-        let expected: Value = vec![42.into(), "test".into()].into();
+        let expected = Value::List(vec![42.into(), "test".into()]);
         assert_eq!(dec.decode().unwrap(), expected);
     }
 
@@ -338,13 +329,12 @@ mod test_decoder_return_values {
         let src = b"li42e4:testd3:cow3:mooel3:egg4:spamee";
         let mut dec = Decoder::new(&src[..]);
 
-        let expected: Value = vec![
+        let expected = Value::List(vec![
             42.into(),
             "test".into(),
-            BTreeMap::from([(b"cow".into(), "moo".into())]).into(),
-            vec!["egg".into(), "spam".into()].into(),
-        ]
-        .into();
+            Value::Dictionary(vec![("cow".into(), "moo".into())]),
+            Value::List(vec!["egg".into(), "spam".into()]),
+        ]);
 
         assert_eq!(dec.decode().unwrap(), expected);
     }
@@ -362,17 +352,17 @@ mod test_decoder_return_values {
         let src = b"d4:testi42ee";
         let mut dec = Decoder::new(&src[..]);
 
-        let mut expected = BTreeMap::new();
-        expected.insert(b"test".into(), 42.into());
-
-        assert_eq!(dec.decode().unwrap(), expected,)
+        assert_eq!(
+            dec.decode().unwrap(),
+            Value::Dictionary(vec![("test".into(), 42.into())])
+        )
     }
 
     #[test]
     fn dict_valid_empty() {
         let src = b"de";
         let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), BTreeMap::new())
+        assert_eq!(dec.decode().unwrap(), Value::Dictionary(Vec::new()))
     }
 
     #[test]
@@ -381,12 +371,15 @@ mod test_decoder_return_values {
         let mut dec = Decoder::new(&src[..]);
         assert_eq!(
             dec.decode().unwrap(),
-            BTreeMap::from([
+            Value::Dictionary(vec![
                 (b"test".into(), 42.into()),
-                (b"list".into(), vec!["cow".into(), "moo".into()].into()),
+                (
+                    b"list".into(),
+                    Value::List(vec!["cow".into(), "moo".into()].into())
+                ),
                 (
                     b"dict".into(),
-                    BTreeMap::from([(b"egg".into(), "spam".into())]).into()
+                    Value::Dictionary(vec![("egg".into(), "spam".into())])
                 )
             ])
         );
@@ -483,7 +476,8 @@ mod test_decoder {
     fn test_huge_file() {
         let _profiler = dhat::Profiler::new_heap();
 
-        let data = fs::read("../test_data/benchmarks/heavy.torrent").expect("file exists and can be read");
+        let data =
+            fs::read("../test_data/benchmarks/heavy.torrent").expect("file exists and can be read");
 
         let mut dec = Decoder::new(&data[..]);
         let result = dec.decode();
