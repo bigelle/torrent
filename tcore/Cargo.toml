@@ -6,14 +6,20 @@ edition = "2024"
 [dependencies]
 atoi = "2.0.0"
 bytes = "1.11.0"
-thiserror = "2.0.17"
-
-[dev-dependencies]
 dhat = "0.3"
+thiserror = "2.0.17"
 
 [profile.release]
 debug = 1
 
+[dev-dependencies]
+dhat = { version = "0.3"}
+
 [features]
 dhat-heap = []    # if you are doing heap profiling
 dhat-ad-hoc = []  # if you are doing ad hoc profiling
+
+[[bin]]
+name = "bench_bencode"
+path = "src/bin/bench_bencode.rs"
+

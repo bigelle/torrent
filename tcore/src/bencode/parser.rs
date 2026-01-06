@@ -1,7 +1,4 @@
-use crate::bencode::{
-    DecodeError,
-    value::{ByteString, Value},
-};
+use crate::bencode::{DecodeError, value::Value};
 use atoi::FromRadix10SignedChecked;
 
 #[derive(PartialEq, Debug)]
@@ -40,7 +37,9 @@ pub(in crate::bencode) fn parse_string(buf: &[u8]) -> Result<(Option<Token>, usi
     }
 
     Ok((
-        Some(Token::Primitive(buf[i + 1..i + 1 + len].into())),
+        Some(Token::Primitive(Value::String(
+            buf[i + 1..i + 1 + len].into(),
+        ))),
         i + len + 1,
     ))
 }

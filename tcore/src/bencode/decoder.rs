@@ -188,8 +188,6 @@ where
 
 #[cfg(test)]
 mod test_decoder_return_values {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     #[test]
@@ -469,21 +467,6 @@ mod test_decoder {
             }
 
             assert!(not_failed)
-        }
-    }
-
-    #[test]
-    fn test_huge_file() {
-        let _profiler = dhat::Profiler::new_heap();
-
-        let data =
-            fs::read("../test_data/benchmarks/heavy.torrent").expect("file exists and can be read");
-
-        let mut dec = Decoder::new(&data[..]);
-        let result = dec.decode();
-
-        if !result.is_ok() {
-            panic!("Failed to decode fixture: {}", result.unwrap_err());
         }
     }
 }

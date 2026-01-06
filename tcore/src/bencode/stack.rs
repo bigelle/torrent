@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use thiserror::Error;
 
 use super::value::{ByteString, Value};
@@ -11,8 +9,8 @@ pub struct Stack {
 
 #[derive(PartialEq, Debug, Error)]
 pub enum StructureError {
-    #[error("expected string as a key in dictionary, got SOMETHING FFUICKING ELSE")] //FIXME:
-    PushToDictError,
+    #[error("expected string as a key in dictionary, got {0}")] //FIXME:
+    PushToDictError(Value),
     #[error("dictionary key has no value")]
     OrphanedKey,
 }
@@ -45,13 +43,9 @@ impl Stack {
     /// Pops the top container from the stack, and if it was the last item on stack, returns it.
     pub fn pop_container(&mut self) -> Result<Option<Value>, StructureError> {
         match self.stack.pop() {
-            Some(top) => self.push_value(top.to_value()?),
+            Some(top) => self.push_value(top.finish()?),
             None => Ok(None),
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.stack.is_empty()
     }
 }
 
@@ -77,7 +71,7 @@ impl Container {
         }
     }
 
-    fn to_value(self) -> Result<Value, StructureError> {
+    fn finish(self) -> Result<Value, StructureError> {
         match self {
             Self::List(l) => Ok(l.into()),
             Self::Dict(d) => Ok(Value::Dictionary(d.finish()?.into())),
@@ -106,7 +100,7 @@ impl DictBuilder {
                     self.pending_key = Some(s);
                     Ok(())
                 } else {
-                    Err(StructureError::PushToDictError)
+                    Err(StructureError::PushToDictError(v))
                 }
             }
             Some(k) => {

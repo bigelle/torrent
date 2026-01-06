@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::BTreeMap, fmt::Display};
+use std::fmt::Display;
 
 /// ByteString - bencoded string as byte sequence
 pub type ByteString = Vec<u8>;
@@ -40,8 +40,8 @@ impl From<&[u8]> for Value {
     }
 }
 
-impl From<& str> for Value {
-    fn from(value: & str) -> Self {
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
         Self::String(value.as_bytes().to_vec())
     }
 }
@@ -81,4 +81,3 @@ impl PartialEq<Vec<Value>> for Value {
         matches!(self, Self::List(l) if l == other)
     }
 }
-
