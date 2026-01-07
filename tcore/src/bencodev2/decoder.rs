@@ -48,15 +48,24 @@ impl<'a> Decoder<'a> {
         match self.current_byte() {
             b'i' => self.give_int_token(),
             b'0'..=b'9' => self.give_string_token(),
-            b'l' => Ok(Token::BeginList),
-            b'd' => Ok(Token::BeginDict),
-            b'e' => Ok(Token::EndObject),
+            b'l' => {
+                self.pos += 1;
+                Ok(Token::BeginList)
+            }
+            b'd' => {
+                self.pos += 1;
+                Ok(Token::BeginDict)
+            }
+            b'e' => {
+                self.pos += 1;
+                Ok(Token::EndObject)
+            }
             v => Err(DecodeError::UnknownToken(v)),
         }
     }
 
     fn give_int_token(&mut self) -> Result<Token<'a>, DecodeError> {
-        let e_pos = match self.src.iter().position(|x| *x == b'e') {
+        let e_pos = match self.src[self.pos..].iter().position(|x| *x == b'e') {
             Some(pos) => pos,
             None => return Err(DecodeError::UnfinishedInt),
         };
@@ -65,15 +74,16 @@ impl<'a> Decoder<'a> {
             return Err(DecodeError::TokenTooLarge);
         }
 
-        self.pos += 1; // stepping through the 'i'
+        self.pos += 1;
 
-        let (maybe_n, size) =
+        dbg!(self.pos, self.pos + e_pos);
+        let (maybe_n, used) =
             i64::from_radix_10_signed_checked(&self.src[self.pos..self.pos + e_pos]);
 
         match maybe_n {
             Some(n) => {
-                if size != e_pos - 1 {
-                    // -1 because we stepped through the i
+                if used != e_pos -1{
+                    dbg!(used, e_pos);
                     return Err(DecodeError::WrongSyntax);
                 }
                 self.pos += e_pos;
@@ -84,7 +94,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn give_string_token(&mut self) -> Result<Token<'a>, DecodeError> {
-        let col_pos = match self.src.iter().position(|x| *x == b':') {
+        let col_pos = match self.src[self.pos..].iter().position(|x| *x == b':') {
             Some(pos) => pos,
             None => return Err(DecodeError::MissingColonInString),
         };
@@ -100,14 +110,13 @@ impl<'a> Decoder<'a> {
         let len = match maybe_len {
             Some(len) => {
                 if size != col_pos {
-                    dbg!(size, col_pos - 1);
+                    dbg!(size, col_pos);
                     return Err(DecodeError::WrongSyntax);
                 }
                 self.pos += col_pos;
                 len
             }
             None => {
-                dbg!("here we are", &self.src[self.pos..self.pos + col_pos]);
                 return Err(DecodeError::WrongSyntax);
             }
         } as usize;
@@ -137,23 +146,23 @@ mod test_decode {
 
     #[test]
     fn single_valid_int_token() {
-        let input = b"i42e";
+        let input = b"i4e";
         let mut dec = Decoder::new(input);
 
-        assert_eq!(dec.next_token().unwrap(), Token::Int(42));
-        assert_eq!(dec.pos, 4)
+        assert_eq!(dec.next_token().unwrap(), Token::Int(4));
+        assert_eq!(dec.pos, 3)
     }
 
     #[test]
     fn multiple_valid_int_token() {
-        let input = b"i42ei69e";
+        let input = b"i42ei6e";
         let mut dec = Decoder::new(input);
 
         assert_eq!(dec.next_token().unwrap(), Token::Int(42));
         assert_eq!(dec.pos, 4);
 
-        assert_eq!(dec.next_token().unwrap(), Token::Int(69));
-        assert_eq!(dec.pos, 8);
+        assert_eq!(dec.next_token().unwrap(), Token::Int(6));
+        assert_eq!(dec.pos, 7);
     }
 
     #[test]
