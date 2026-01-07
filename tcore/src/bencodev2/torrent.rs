@@ -59,17 +59,16 @@ pub enum TorrentFileError {
 
 impl Torrent {
     pub fn from_file<R: Read>(src: R) -> Result<Torrent, TorrentFileError> {
-        let mut torrent_builder = TorrentBuilder::new(src);
+        let mut buf = BufReader::new(src);
+        let data = buf.fill_buf()?;
+        let torrent_builder = TorrentBuilder::new(data);
         torrent_builder.build()
     }
 }
 
-struct TorrentBuilder<R>
-where
-    R: Read,
-{
+struct TorrentBuilder<'a> {
     state: TorrentBuilderState,
-    src: R,
+    src: &'a [u8],
 }
 
 enum TorrentBuilderState {
@@ -80,11 +79,8 @@ enum TorrentBuilderState {
     End, // do i need it?
 }
 
-impl<R> TorrentBuilder<R>
-where
-    R: Read,
-{
-    fn new(src: R) -> TorrentBuilder<R> {
+impl<'a> TorrentBuilder<'a> {
+    fn new(src: &[u8]) -> TorrentBuilder {
         TorrentBuilder {
             state: TorrentBuilderState::ExpectingAnnounce,
             src,
@@ -108,11 +104,9 @@ where
         }
 
         // announce key
-        match dec.next_token() {
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"announce") => {}
-            Ok(_) => return Err(TorrentFileError::MissingAnnounceKey),
-            Err(e) => return Err(TorrentFileError::Decode(e)),
-        };
+        if !self.is_next_key(&mut dec, b"announce")? {
+            return Err(TorrentFileError::MissingAnnounceKey);
+        }
         let announce_url = match dec.next_token()? {
             Token::String(cow) => cow.into_owned(),
             _ => return Err(TorrentFileError::MissingAnnounceURL),
@@ -120,22 +114,18 @@ where
         torrent.announce = String::from_utf8(announce_url).map_err(|e| e.utf8_error())?;
 
         //info
-        match dec.next_token() {
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"info") => {}
-            Ok(_) => return Err(TorrentFileError::MissingInfoKey),
-            Err(e) => return Err(TorrentFileError::Decode(e)),
-        };
+        if !self.is_next_key(&mut dec, b"info")? {
+            return Err(TorrentFileError::MissingInfoKey);
+        }
         let info = dec.next_token()?;
         if info != Token::BeginDict {
             return Err(TorrentFileError::MissingInfoOpener);
         }
 
         //info:name
-        match dec.next_token() {
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"name") => {}
-            Ok(_) => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
-            Err(e) => return Err(TorrentFileError::Decode(e)),
-        };
+        if !self.is_next_key(&mut dec, b"name")? {
+            return Err(TorrentFileError::MissingAnnounceKey); // FIXME: not announce key
+        }
         let name = match dec.next_token()? {
             Token::String(cow) => cow.into_owned(),
             _ => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
@@ -143,11 +133,9 @@ where
         torrent.info.name = String::from_utf8(name).map_err(|e| e.utf8_error())?;
 
         //info: piece length
-        match dec.next_token() {
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"piece length") => {}
-            Ok(_) => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
-            Err(e) => return Err(TorrentFileError::Decode(e)),
-        };
+        if !self.is_next_key(&mut dec, b"piece length")? {
+            return Err(TorrentFileError::MissingAnnounceKey); // FIXME: not announce key
+        }
         let piece_length = match dec.next_token()? {
             Token::Int(len) => len,
             _ => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
@@ -155,11 +143,9 @@ where
         torrent.info.piece_length = piece_length as usize;
 
         //info: pieces
-        match dec.next_token() {
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"pieces") => {}
-            Ok(_) => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
-            Err(e) => return Err(TorrentFileError::Decode(e)),
-        };
+        if !self.is_next_key(&mut dec, b"pieces")? {
+            return Err(TorrentFileError::MissingAnnounceKey); // FIXME: not announce key
+        }
         let pieces = match dec.next_token()? {
             Token::String(cow) => cow.into_owned(),
             _ => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
@@ -167,18 +153,15 @@ where
         torrent.info.pieces = pieces;
 
         //info: length OR files
-        match dec.next_token() {
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"length") => {
-                // info: length
+
+        if let Some(key) = self.next_key(&mut dec)? {
+            if is_key(b"length", &key) {
                 let length = match dec.next_token()? {
                     Token::Int(len) => len,
                     _ => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
                 };
                 torrent.info.length = Some(length as usize);
-            }
-
-            Ok(Token::String(cow)) if cow == Cow::Borrowed(b"files") => {
-                //info: files
+            } else if is_key(b"files", &key) {
                 let files_list_opener = dec.next_token()?;
                 if files_list_opener != Token::BeginList {
                     return Err(TorrentFileError::MissingListOfFilesOpener);
@@ -189,19 +172,17 @@ where
                         Token::BeginDict => {
                             let mut file = File::default();
 
-                            match dec.next_token()? {
-                                Token::String(cow) if cow == Cow::Borrowed(b"length") => {
+                            if self.is_next_key(&mut dec, b"length")? {
                                     let length = match dec.next_token()? {
                                         Token::Int(len) => len,
                                         _ => return Err(TorrentFileError::MissingFileLength),
                                     };
                                     file.length = length as usize;
-                                }
-                                _ => return Err(TorrentFileError::MissingFileLength),
+                            } else {
+                                return Err(TorrentFileError::MissingFileLength);
                             }
 
-                            match dec.next_token()? {
-                                Token::String(cow) if cow == Cow::Borrowed(b"path") => {
+                            if self.is_next_key(&mut dec, b"path")? {
                                     match dec.next_token()? {
                                         Token::BeginList => (),
                                         _ => return Err(TorrentFileError::MissingFilePath),
@@ -212,8 +193,7 @@ where
                                         let path_piece = match dec.next_token()? {
                                             Token::String(cow) => cow.into_owned(),
                                             Token::EndObject => break,
-                                            _ => return Err(TorrentFileError::MissingFilePath), //FIXME:
-                                                                                                //not file length
+                                            _ => return Err(TorrentFileError::MissingFilePath),
                                         };
                                         let path_piece = String::from_utf8(path_piece)
                                             .map_err(|e| e.utf8_error())?;
@@ -221,8 +201,8 @@ where
                                         path.push_str(&path_piece);
                                     }
                                     file.path = path;
-                                }
-                                _ => return Err(TorrentFileError::MissingFileLength),
+                            } else {
+                                return Err(TorrentFileError::MissingFileLength);
                             }
 
                             match dec.next_token()? {
@@ -242,14 +222,36 @@ where
                         _ => return Err(TorrentFileError::MissingNextFileOpener),
                     }
                 }
+            } else {
+                return Err(TorrentFileError::MissingInfoOpener); // FIXME: missing length or files
             }
-
-            Ok(_) => return Err(TorrentFileError::MissingAnnounceKey), // FIXME: not announce key
-            Err(e) => return Err(TorrentFileError::Decode(e)),
-        };
+        } else {
+            return Err(TorrentFileError::MissingInfoOpener); // FIXME: missing length or files
+        }
 
         Ok(torrent)
     }
+
+    /// IT CONSUMES THE TOKEN
+    fn is_next_key(&self, dec: &mut Decoder<'a>, key: &'a [u8]) -> Result<bool, TorrentFileError> {
+        if let Some(next_key) = self.next_key(dec)? {
+            return Ok(next_key == Cow::Borrowed(key));
+        } else {
+            return Ok(false);
+        }
+    }
+
+    /// IT CONSUMES THE TOKEN
+    fn next_key(&self, dec: &mut Decoder<'a>) -> Result<Option<Cow<'a, [u8]>>, TorrentFileError> {
+        match dec.next_token()? {
+            Token::String(cow) => Ok(Some(cow)),
+            _ => Ok(None),
+        }
+    }
+}
+
+fn is_key<'a>(expected: &[u8], got: &Cow<'a, [u8]>) -> bool {
+    return Cow::Borrowed(expected) == *got;
 }
 
 #[cfg(test)]
