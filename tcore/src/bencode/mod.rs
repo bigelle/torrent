@@ -8,3 +8,5 @@ mod stack;
 mod value;
 
 mod parser;
+
+mod torrent;

@@ -184,6 +184,10 @@ where
             self.buf.advance(n);
         }
     }
+
+    fn consume_token() {
+        todo!("consume token manually - when data is already used and it's safe to move cursor further")
+    }
 }
 
 #[cfg(test)]
