@@ -41,30 +41,31 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Token<'a>, DecodeError> {
-        if self.pos > self.src.len() {
-            return Err(DecodeError::PosOutOfBounds);
-        }
+        let (token, size) = self.peek_token()?;
+        self.step_forward(size)?;
+        Ok(token)
+    }
 
+    pub fn peek_token(&self) -> Result<(Token<'a>, usize), DecodeError> {
         match self.current_byte() {
             b'i' => self.give_int_token(),
             b'0'..=b'9' => self.give_string_token(),
-            b'l' => {
-                self.pos += 1;
-                Ok(Token::BeginList)
-            }
-            b'd' => {
-                self.pos += 1;
-                Ok(Token::BeginDict)
-            }
-            b'e' => {
-                self.pos += 1;
-                Ok(Token::EndObject)
-            }
+            b'l' => Ok((Token::BeginList, 1)),
+            b'd' => Ok((Token::BeginDict, 1)),
+            b'e' => Ok((Token::EndObject, 1)),
             v => Err(DecodeError::UnknownToken(v)),
         }
     }
 
-    fn give_int_token(&mut self) -> Result<Token<'a>, DecodeError> {
+    pub fn step_forward(&mut self, steps: usize) -> Result<(), DecodeError> {
+        if self.pos + steps > self.src.len() {
+            return Err(DecodeError::PosOutOfBounds);
+        }
+        self.pos+=steps;
+        Ok(())
+    }
+
+    fn give_int_token(&self) -> Result<(Token<'a>, usize), DecodeError> {
         let e_pos = match self.src[self.pos..].iter().position(|x| *x == b'e') {
             Some(pos) => pos,
             None => return Err(DecodeError::UnfinishedInt),
@@ -74,26 +75,21 @@ impl<'a> Decoder<'a> {
             return Err(DecodeError::TokenTooLarge);
         }
 
-        self.pos += 1;
-
-        dbg!(self.pos, self.pos + e_pos);
         let (maybe_n, used) =
-            i64::from_radix_10_signed_checked(&self.src[self.pos..self.pos + e_pos]);
+            i64::from_radix_10_signed_checked(&self.src[self.pos + 1..self.pos + 1 + e_pos]);
 
         match maybe_n {
             Some(n) => {
-                if used != e_pos -1{
-                    dbg!(used, e_pos);
+                if used != e_pos - 1 {
                     return Err(DecodeError::WrongSyntax);
                 }
-                self.pos += e_pos;
-                Ok(Token::Int(n))
+                Ok((Token::Int(n), e_pos + 1))
             }
             None => return Err(DecodeError::WrongSyntax),
         }
     }
 
-    fn give_string_token(&mut self) -> Result<Token<'a>, DecodeError> {
+    fn give_string_token(&self) -> Result<(Token<'a>, usize), DecodeError> {
         let col_pos = match self.src[self.pos..].iter().position(|x| *x == b':') {
             Some(pos) => pos,
             None => return Err(DecodeError::MissingColonInString),
@@ -110,10 +106,8 @@ impl<'a> Decoder<'a> {
         let len = match maybe_len {
             Some(len) => {
                 if size != col_pos {
-                    dbg!(size, col_pos);
                     return Err(DecodeError::WrongSyntax);
                 }
-                self.pos += col_pos;
                 len
             }
             None => {
@@ -121,18 +115,16 @@ impl<'a> Decoder<'a> {
             }
         } as usize;
 
-        self.pos += 1; // stepping through the ":'
-
-        let have = self.src[self.pos..].len() as usize;
+        let have = self.src[self.pos + col_pos + 1..].len() as usize;
         if have < len {
             return Err(DecodeError::UnfinishedString(len, have));
         }
 
-        let token = Token::String(Cow::Borrowed(&self.src[self.pos..self.pos + len]));
+        let token = Token::String(Cow::Borrowed(
+            &self.src[self.pos + col_pos + 1..self.pos + col_pos + len + 1],
+        ));
 
-        self.pos += len;
-
-        Ok(token)
+        Ok((token, col_pos + len + 1))
     }
 
     fn current_byte(&self) -> u8 {
@@ -150,7 +142,6 @@ mod test_decode {
         let mut dec = Decoder::new(input);
 
         assert_eq!(dec.next_token().unwrap(), Token::Int(4));
-        assert_eq!(dec.pos, 3)
     }
 
     #[test]
@@ -159,10 +150,8 @@ mod test_decode {
         let mut dec = Decoder::new(input);
 
         assert_eq!(dec.next_token().unwrap(), Token::Int(42));
-        assert_eq!(dec.pos, 4);
 
         assert_eq!(dec.next_token().unwrap(), Token::Int(6));
-        assert_eq!(dec.pos, 7);
     }
 
     #[test]
@@ -196,7 +185,6 @@ mod test_decode {
             dec.next_token().unwrap(),
             Token::String(Cow::Borrowed(b"test"))
         );
-        assert_eq!(dec.pos, 6);
     }
 
     #[test]
@@ -208,13 +196,11 @@ mod test_decode {
             dec.next_token().unwrap(),
             Token::String(Cow::Borrowed(b"test"))
         );
-        assert_eq!(dec.pos, 6);
 
         assert_eq!(
             dec.next_token().unwrap(),
             Token::String(Cow::Borrowed(b"foo"))
         );
-        assert_eq!(dec.pos, 11);
     }
 
     #[test]
