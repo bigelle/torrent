@@ -2,9 +2,9 @@
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-use std::{env, fs, io::BufReader};
+use std::{env, fs};
 
-use tcore::bencode;
+use tcore::bencode::torrent::Torrent;
 
 fn main() {
     #[cfg(feature = "dhat-heap")]
@@ -17,10 +17,7 @@ fn main() {
 
     let path = &args[1];
 
-    let file = fs::File::open(path).expect("file exists and can be read");
-    let file = BufReader::new(file);
+    let mut file = fs::File::open(path).expect("file must be available for reading");
 
-    let mut dec = bencode::Decoder::new(file);
-    let value = dec.decode().expect("decoded value");
-    println!("{}", value)
+    Torrent::from_file(&mut file).expect("torrent file must be parsed");
 }

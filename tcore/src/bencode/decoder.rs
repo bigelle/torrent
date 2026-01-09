@@ -1,476 +1,270 @@
-use std::io::{self, BufRead};
+use std::{borrow::Cow, fmt::Display};
 
-use bytes::{Buf, BufMut, BytesMut};
+use atoi::FromRadix10SignedChecked;
 use thiserror::Error;
 
-use super::stack::StructureError;
-
-use super::parser;
-use super::parser::Token;
-use super::stack::Stack;
-use super::value::Value;
-
-pub struct Decoder<T>
-where
-    T: BufRead,
-{
-    src: T,
-    buf: BytesMut,
-    stack: Stack,
+#[derive(PartialEq, Debug)]
+pub enum Token<'a> {
+    Int(i64),
+    String(Cow<'a, [u8]>),
+    BeginDict, //Cumberbatch
+    BeginList,
+    EndObject,
 }
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
+pub enum TokenKind {
+    Int,
+    String,
+    BeginDict,
+    BeginList,
+    EndObject,
+}
+
+impl<'a> Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Int => write!(f, "Int"),
+            Self::String => write!(f, "String"),
+            Self::BeginDict => write!(f, "BeginDict"),
+            Self::BeginList => write!(f, "BeginList"),
+            Self::EndObject => write!(f, "EndObject"),
+        }
+    }
+}
+
+impl<'a> From<Token<'a>> for TokenKind {
+    fn from(value: Token<'a>) -> Self {
+        match value {
+            Token::Int(_) => TokenKind::Int,
+            Token::String(_) => TokenKind::String,
+            Token::BeginDict => TokenKind::BeginDict,
+            Token::BeginList => TokenKind::BeginList,
+            Token::EndObject => TokenKind::EndObject,
+        }
+    }
+}
+
+pub struct Decoder<'a> {
+    src: &'a [u8],
+    pos: usize,
+}
+
+#[derive(Debug, Error)]
 pub enum DecodeError {
-    #[error("invalid bencode syntax")]
-    InvalidSyntax,
-    #[error("invalid object structure: {0}")]
-    InvalidStructure(#[from] StructureError),
-    #[error("bencoded value is too large")]
-    ValueTooLarge,
-    #[error("unable to read file: {0}")]
-    Io(#[from] io::Error),
-    #[error("unexpected EOF")]
-    UnexpectedEof,
-    #[error("unused trailing data in buffer")]
-    TrailingDataInBuffer,
+    #[error("unfinished string at index {0}: expected {1} bytes, got {2}")]
+    UnfinishedString(usize, usize, usize),
+    #[error("unfinished int")]
+    UnfinishedInt,
+    #[error("unknown token: {0}")]
+    UnknownToken(u8),
+    #[error("decoder position out of buffer bounds")]
+    PosOutOfBounds,
+    #[error("token is too large")]
+    TokenTooLarge,
+    #[error("syntax error")]
+    WrongSyntax,
+    #[error("missing colon in string")]
+    MissingColonInString,
 }
 
-impl PartialEq for DecodeError {
-    fn eq(&self, other: &Self) -> bool {
-        use DecodeError::*;
-        match (self, other) {
-            (InvalidSyntax, InvalidSyntax) => true,
-            (ValueTooLarge, ValueTooLarge) => true,
-            (Io(_), Io(_)) => true,
-            (UnexpectedEof, UnexpectedEof) => true,
-            _ => false,
-        }
+impl<'a> Decoder<'a> {
+    pub fn new(src: &'a [u8]) -> Decoder<'a> {
+        Decoder { src: src, pos: 0 }
     }
-}
 
-impl<T> Decoder<T>
-where
-    T: BufRead,
-{
-    pub fn new(src: T) -> Decoder<T> {
-        Decoder {
-            src: src,
-            buf: BytesMut::with_capacity(4096),
-            stack: Stack::new(),
+    pub fn next_token(&mut self) -> Result<Token<'a>, DecodeError> {
+        let (token, size) = self.peek_token()?;
+        self.step_forward(size)?;
+        Ok(token)
+    }
+
+    pub fn peek_token(&self) -> Result<(Token<'a>, usize), DecodeError> {
+        match self.current_byte() {
+            b'i' => self.give_int_token(),
+            b'0'..=b'9' => self.give_string_token(),
+            b'l' => Ok((Token::BeginList, 1)),
+            b'd' => Ok((Token::BeginDict, 1)),
+            b'e' => Ok((Token::EndObject, 1)),
+            v => Err(DecodeError::UnknownToken(v)),
         }
     }
 
-    pub fn with_capacity(src: T, cap: usize) -> Decoder<T> {
-        Decoder {
-            src: src,
-            buf: BytesMut::with_capacity(cap),
-            stack: Stack::new(),
+    pub fn step_forward(&mut self, steps: usize) -> Result<(), DecodeError> {
+        if self.pos + steps > self.src.len() {
+            return Err(DecodeError::PosOutOfBounds);
         }
+        self.pos += steps;
+        Ok(())
     }
 
-    pub fn decode(&mut self) -> Result<Value, DecodeError> {
-        let result = loop {
-            let maybe_token = self.next_token()?;
-
-            match maybe_token {
-                Some(token) => {
-                    match token {
-                        Token::Primitive(v) => match self.stack.push_value(v) {
-                            Ok(returned) => {
-                                if let Some(v) = returned {
-                                    break v;
-                                }
-                            }
-                            Err(e) => return Err(DecodeError::InvalidStructure(e)),
-                        },
-
-                        Token::BeginList => {
-                            self.stack.push_list();
-                        }
-
-                        Token::BeginDict => {
-                            self.stack.push_dict();
-                        }
-
-                        Token::EndOfObj => match self.stack.pop_container() {
-                            Ok(returned) => {
-                                if let Some(v) = returned {
-                                    break v;
-                                }
-                            }
-                            Err(e) => return Err(DecodeError::InvalidStructure(e)),
-                        },
-
-                        Token::Invalid => return Err(DecodeError::InvalidSyntax),
-                    };
-                }
-
-                None => {
-                    let len = self.refill()?;
-                    if len == 0 {
-                        return Err(DecodeError::UnexpectedEof);
-                    }
-                }
-            }
+    fn give_int_token(&self) -> Result<(Token<'a>, usize), DecodeError> {
+        let e_pos = match self.src[self.pos..].iter().position(|x| *x == b'e') {
+            Some(pos) => pos,
+            None => return Err(DecodeError::UnfinishedInt),
         };
 
-        if !self.buf.is_empty() {
-            return Err(DecodeError::TrailingDataInBuffer);
+        if e_pos - 1 > 12 {
+            return Err(DecodeError::TokenTooLarge);
         }
 
-        return Ok(result);
+        let (maybe_n, used) =
+            i64::from_radix_10_signed_checked(&self.src[self.pos + 1..self.pos + 1 + e_pos]);
+
+        match maybe_n {
+            Some(n) => {
+                if used != e_pos - 1 {
+                    return Err(DecodeError::WrongSyntax);
+                }
+                Ok((Token::Int(n), e_pos + 1))
+            }
+            None => return Err(DecodeError::WrongSyntax),
+        }
     }
 
-    /// returns None if it needs more bytes
-    pub fn next_token(&mut self) -> Result<Option<Token>, DecodeError> {
-        let b = match self.buf.first() {
-            Some(b) => b,
-            None => return Ok(None),
+    fn give_string_token(&self) -> Result<(Token<'a>, usize), DecodeError> {
+        let col_pos = match self.src[self.pos..].iter().position(|x| *x == b':') {
+            Some(pos) => pos,
+            None => return Err(DecodeError::MissingColonInString),
         };
 
-        match b {
-            b'i' => {
-                let (maybe_token, len) = match parser::parse_int(&self.buf) {
-                    Ok(ok) => ok,
-                    Err(e) => return Err(e),
-                };
-                self.advance_buf(len);
-                Ok(maybe_token)
-            }
-            b'0'..=b'9' => {
-                let (maybe_token, len) = match parser::parse_string(&self.buf) {
-                    Ok(ok) => ok,
-                    Err(e) => return Err(e),
-                };
-                self.advance_buf(len);
-                Ok(maybe_token)
-            }
-            b'l' => {
-                self.advance_buf(1);
-                Ok(Some(Token::BeginList))
-            }
-            b'd' => {
-                self.advance_buf(1);
-                Ok(Some(Token::BeginDict))
-            }
-            b'e' => {
-                self.advance_buf(1);
-                Ok(Some(Token::EndOfObj))
-            }
-            _ => Ok(Some(Token::Invalid)),
-        }
-    }
-
-    pub fn refill(&mut self) -> Result<usize, DecodeError> {
-        let available = self.src.fill_buf()?;
-
-        if available.is_empty() {
-            return Ok(0);
+        if col_pos > 12 {
+            // who needs a trillion of bytes?
+            return Err(DecodeError::TokenTooLarge);
         }
 
-        let size = available.len();
+        let (maybe_len, size) =
+            u64::from_radix_10_signed_checked(&self.src[self.pos..self.pos + col_pos]);
 
-        self.buf.reserve(size);
+        let size = match maybe_len {
+            Some(len) => {
+                if size != col_pos {
+                    return Err(DecodeError::WrongSyntax);
+                }
+                len
+            }
+            None => {
+                return Err(DecodeError::WrongSyntax);
+            }
+        } as usize;
 
-        self.buf.put_slice(available);
-
-        self.src.consume(size);
-
-        Ok(size)
-    }
-
-    fn advance_buf(&mut self, n: usize) {
-        if self.buf.len() >= n {
-            self.buf.advance(n);
+        let have = self.src[self.pos + col_pos + 1..].len() as usize;
+        if have < size {
+            return Err(DecodeError::UnfinishedString(self.pos, size, have));
         }
+
+        let token = Token::String(Cow::Borrowed(
+            &self.src[self.pos + col_pos + 1..self.pos + col_pos + size + 1],
+        ));
+
+        Ok((token, col_pos + size + 1))
     }
 
-    fn consume_token() {
-        todo!("consume token manually - when data is already used and it's safe to move cursor further")
+    fn current_byte(&self) -> u8 {
+        self.src[self.pos]
     }
 }
 
 #[cfg(test)]
-mod test_decoder_return_values {
+mod test_decode {
     use super::*;
 
     #[test]
-    fn source_error_junk_trail_in_buffer() {
-        let src = b"li42e4:teste3:cow";
-        let mut dec = Decoder::new(&src[..]);
+    fn single_valid_int_token() {
+        let input = b"i4e";
+        let mut dec = Decoder::new(input);
+
+        assert_eq!(dec.next_token().unwrap(), Token::Int(4));
+    }
+
+    #[test]
+    fn multiple_valid_int_token() {
+        let input = b"i42ei6e";
+        let mut dec = Decoder::new(input);
+
+        assert_eq!(dec.next_token().unwrap(), Token::Int(42));
+
+        assert_eq!(dec.next_token().unwrap(), Token::Int(6));
+    }
+
+    #[test]
+    fn error_int_too_large() {
+        let input = b"i1000000000000e"; // more than 999_999_999_999 by one
+        let mut dec = Decoder::new(input);
+
         assert!(matches!(
-            dec.decode(),
-            Err(DecodeError::TrailingDataInBuffer)
-        ));
-    }
-
-    // STRINGS:
-    #[test]
-    fn string_valid() {
-        let src = b"4:test";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), &b"test"[..]);
+            dec.next_token().unwrap_err(),
+            DecodeError::TokenTooLarge
+        ))
     }
 
     #[test]
-    fn string_valid_empty() {
-        let src = b"0:";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), &b""[..]);
+    fn error_int_is_not_finished() {
+        let input = b"i42"; // more than 999_999_999_999 by one
+        let mut dec = Decoder::new(input);
+
+        assert!(matches!(
+            dec.next_token().unwrap_err(),
+            DecodeError::UnfinishedInt
+        ))
     }
 
     #[test]
-    fn string_error_leading_zero_in_length() {
-        let src = b"04:test";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
-    }
-
-    #[test]
-    fn string_valid_binary_bytes() {
-        let src = b"3:\x00\x01\x02";
-        let mut dec = Decoder::new(&src[..]);
-        let val = dec.decode().unwrap();
-        assert_eq!(val, &b"\x00\x01\x02"[..]);
-        let Value::String(str) = val else {
-            panic!("expected string, got {val}")
-        };
-        assert_eq!(str.len(), 3);
-    }
-
-    #[test]
-    fn string_error_too_big() {
-        let mut src: Vec<u8> = Vec::new();
-        for _ in 0..100 {
-            src.push(b'9');
-        }
-        src.push(b':');
-        for _ in 0..100 {
-            src.push(b'a');
-        }
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::ValueTooLarge)));
-    }
-
-    // INTEGERS:
-    #[test]
-    fn int_valid_only_zero() {
-        let src = b"i0e";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), 0);
-    }
-
-    #[test]
-    fn int_valid_positive() {
-        let src = b"i42e";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), 42);
-    }
-
-    #[test]
-    fn int_valid_negative() {
-        let src = b"i-42e";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), -42);
-    }
-
-    #[test]
-    fn int_error_invalid_syntax() {
-        let src = b"i4a2e";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode(), Err(DecodeError::InvalidSyntax));
-    }
-
-    #[test]
-    fn int_error_leading_zero() {
-        let src = b"i042e";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
-    }
-
-    #[test]
-    fn int_error_negative_zero() {
-        let src = b"i-0e";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::InvalidSyntax)));
-    }
-
-    #[test]
-    fn int_error_unexpected_eof() {
-        let src = b"i42";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
-    }
-
-    #[test]
-    fn int_error_too_big() {
-        let src = b"i99999999999999999999999999999999999999999999999999999999999999999999e";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::ValueTooLarge)));
-    }
-
-    // LISTS:
-    #[test]
-    fn list_valid_flat() {
-        let src = b"li42e4:teste";
-        let mut dec = Decoder::new(&src[..]);
-
-        let expected = Value::List(vec![42.into(), "test".into()]);
-        assert_eq!(dec.decode().unwrap(), expected);
-    }
-
-    #[test]
-    fn list_valid_empty() {
-        let src = b"le";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Vec::<Value>::new());
-    }
-
-    #[test]
-    fn list_valid_with_nested_objects() {
-        let src = b"li42e4:testd3:cow3:mooel3:egg4:spamee";
-        let mut dec = Decoder::new(&src[..]);
-
-        let expected = Value::List(vec![
-            42.into(),
-            "test".into(),
-            Value::Dictionary(vec![("cow".into(), "moo".into())]),
-            Value::List(vec!["egg".into(), "spam".into()]),
-        ]);
-
-        assert_eq!(dec.decode().unwrap(), expected);
-    }
-
-    #[test]
-    fn list_error_unexpected_eof() {
-        let src = b"li42e4:test";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
-    }
-
-    // DICTS:
-    #[test]
-    fn dict_valid_flat() {
-        let src = b"d4:testi42ee";
-        let mut dec = Decoder::new(&src[..]);
+    fn single_valid_string_token() {
+        let input = b"4:test";
+        let mut dec = Decoder::new(input);
 
         assert_eq!(
-            dec.decode().unwrap(),
-            Value::Dictionary(vec![("test".into(), 42.into())])
-        )
-    }
-
-    #[test]
-    fn dict_valid_empty() {
-        let src = b"de";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(dec.decode().unwrap(), Value::Dictionary(Vec::new()))
-    }
-
-    #[test]
-    fn dict_valid_with_nested_objects() {
-        let src = b"d4:testi42e4:listl3:cow3:mooe4:dictd3:egg4:spamee";
-        let mut dec = Decoder::new(&src[..]);
-        assert_eq!(
-            dec.decode().unwrap(),
-            Value::Dictionary(vec![
-                (b"test".into(), 42.into()),
-                (
-                    b"list".into(),
-                    Value::List(vec!["cow".into(), "moo".into()].into())
-                ),
-                (
-                    b"dict".into(),
-                    Value::Dictionary(vec![("egg".into(), "spam".into())])
-                )
-            ])
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b"test"))
         );
     }
 
     #[test]
-    fn dict_error_unexpected_eof() {
-        let src = b"d4:testi42e4:listl3:cow3:mooe4:dictd3:egg4:spame";
-        let mut dec = Decoder::new(&src[..]);
-        assert!(matches!(dec.decode(), Err(DecodeError::UnexpectedEof)));
+    fn multiple_valid_string_token() {
+        let input = b"4:test3:foo";
+        let mut dec = Decoder::new(input);
+
+        assert_eq!(
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b"test"))
+        );
+
+        assert_eq!(
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b"foo"))
+        );
     }
 
     #[test]
-    fn dict_error_not_string_key() {
-        let src = b"di42e4:teste";
-        let mut dec = Decoder::new(&src[..]);
+    fn error_string_too_large() {
+        const PREFIX: &[u8] = b"1000000000000:";
+        const TOTAL_LEN: usize = 1_000_000_014;
+
+        let mut input = Vec::with_capacity(1_000_000_014);
+
+        // prefix
+        input.extend_from_slice(PREFIX);
+
+        // fill with 's'
+        input.resize(TOTAL_LEN, b's');
+
+        let mut dec = Decoder::new(&input);
+
         assert!(matches!(
-            dec.decode(),
-            Err(DecodeError::InvalidStructure(_))
+            dec.next_token().unwrap_err(),
+            DecodeError::TokenTooLarge
         ));
     }
 
     #[test]
-    fn dict_error_orphaned_key() {
-        let src = b"d4:teste";
-        let mut dec = Decoder::new(&src[..]);
+    fn error_string_is_not_finished() {
+        let input = b"4:tes";
+        let mut dec = Decoder::new(input);
+
         assert!(matches!(
-            dec.decode(),
-            Err(DecodeError::InvalidStructure(_))
-        ));
-    }
-}
-
-#[cfg(test)]
-mod test_decoder {
-    use super::*;
-    use std::{
-        fs,
-        io::{self, BufReader, Read},
-        path::Path,
-    };
-
-    struct SlowReader<R: Read> {
-        inner: R,
-        limit: usize,
-    }
-
-    impl<R: Read> Read for SlowReader<R> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let max_to_read = std::cmp::min(buf.len(), self.limit);
-            self.inner.read(&mut buf[..max_to_read])
-        }
-    }
-
-    #[test]
-    fn test_slow_stream_decoding() {
-        let fixtures_dir = Path::new("../test_data/fixtures");
-
-        let entries = fs::read_dir(fixtures_dir).expect("Failed to read fixtures directory");
-
-        let mut not_failed = true;
-        for entry in entries {
-            let entry = entry.unwrap();
-            let path = entry.path();
-
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("torrent") {
-                println!("Testing fixture: {:?}", path);
-
-                let data = fs::read(&path).expect("Failed to read file");
-                let src = BufReader::new(SlowReader {
-                    inner: &data[..],
-                    limit: 4,
-                });
-
-                let mut dec = Decoder::new(src);
-                let result = dec.decode();
-
-                if !result.is_ok() {
-                    eprintln!(
-                        "Failed to decode fixture: {:?}, cause: {}",
-                        path,
-                        result.unwrap_err()
-                    );
-                    not_failed = false;
-                    continue;
-                }
-            }
-
-            assert!(not_failed)
-        }
+            dec.next_token().unwrap_err(),
+            DecodeError::UnfinishedString(0, 4, 3)
+        ))
     }
 }
