@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Display};
 
 use atoi::FromRadix10SignedChecked;
 use thiserror::Error;
@@ -10,6 +10,39 @@ pub enum Token<'a> {
     BeginDict, //Cumberbatch
     BeginList,
     EndObject,
+}
+
+#[derive(Debug)]
+pub enum TokenKind {
+    Int,
+    String,
+    BeginDict,
+    BeginList,
+    EndObject,
+}
+
+impl<'a> Display for TokenKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::Int => write!(f, "Int"),
+            Self::String => write!(f, "String"),
+            Self::BeginDict => write!(f, "BeginDict"),
+            Self::BeginList => write!(f, "BeginList"),
+            Self::EndObject => write!(f, "EndObject"),
+        }
+    }
+}
+
+impl<'a> From<Token<'a>> for TokenKind {
+    fn from(value: Token<'a>) -> Self {
+        match value {
+            Token::Int(_) => TokenKind::Int,
+            Token::String(_) => TokenKind::String,
+            Token::BeginDict => TokenKind::BeginDict,
+            Token::BeginList => TokenKind::BeginList,
+            Token::EndObject => TokenKind::EndObject,
+        }
+    }
 }
 
 pub struct Decoder<'a> {
@@ -61,7 +94,7 @@ impl<'a> Decoder<'a> {
         if self.pos + steps > self.src.len() {
             return Err(DecodeError::PosOutOfBounds);
         }
-        self.pos+=steps;
+        self.pos += steps;
         Ok(())
     }
 
