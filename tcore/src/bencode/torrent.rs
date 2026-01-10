@@ -12,6 +12,10 @@ pub struct Torrent {
 
 #[derive(Default, Debug)]
 pub struct Info {
+    // both are for info hash
+    begin_pos: usize,
+    end_pos: usize,
+
     name: String,
     piece_length: usize,
     pieces: Vec<u8>,
@@ -171,12 +175,10 @@ impl<'builder> TorrentBuilder<'builder> {
 
         loop {
             match self.state {
-                TorrentBuilderState::Begin => {
-                    if dec.next_token()? != Token::BeginDict {
-                        return Err(TorrentFileError::MissingMetaInfoOpener);
-                    }
-                    self.state = TorrentBuilderState::MetaInfo;
-                }
+                TorrentBuilderState::Begin => match dec.next_token()? {
+                    Token::BeginDict(_) => self.state = TorrentBuilderState::MetaInfo,
+                    _ => return Err(TorrentFileError::MissingMetaInfoOpener),
+                },
 
                 TorrentBuilderState::MetaInfo => {
                     let token = dec.next_token()?;
@@ -184,7 +186,7 @@ impl<'builder> TorrentBuilder<'builder> {
                         Token::String(key) => self.handle_meta_keys(key, &mut dec, &mut torrent)?,
 
                         // stepping out of the root, we're done:
-                        Token::EndObject => self.state = TorrentBuilderState::Finished,
+                        Token::EndObject(_) => self.state = TorrentBuilderState::Finished,
 
                         _ => {
                             return Err(TorrentFileError::ExpectedKey {
@@ -201,7 +203,10 @@ impl<'builder> TorrentBuilder<'builder> {
                         Token::String(key) => self.handle_info_keys(key, &mut dec, &mut torrent)?,
 
                         // stepping back by one state:
-                        Token::EndObject => self.state = TorrentBuilderState::MetaInfo,
+                        Token::EndObject(pos) => {
+                            torrent.info.end_pos = pos;
+                            self.state = TorrentBuilderState::MetaInfo
+                        }
 
                         _ => {
                             return Err(TorrentFileError::ExpectedKey {
@@ -219,13 +224,13 @@ impl<'builder> TorrentBuilder<'builder> {
 
                     let token = dec.next_token()?;
                     match token {
-                        Token::BeginDict => {
+                        Token::BeginDict(_) => {
                             self.state = TorrentBuilderState::SingularFile;
                             torrent.info.files.as_mut().unwrap().reserve(1);
                         }
 
                         // stepping back by one state:
-                        Token::EndObject => self.state = TorrentBuilderState::Info,
+                        Token::EndObject(_) => self.state = TorrentBuilderState::Info,
 
                         _ => {
                             return Err(TorrentFileError::ExpectedKey {
@@ -242,7 +247,7 @@ impl<'builder> TorrentBuilder<'builder> {
                         Token::String(key) => self.handle_file_keys(key, &mut dec, &mut torrent)?,
 
                         // stepping back by one state:
-                        Token::EndObject => self.state = TorrentBuilderState::Files,
+                        Token::EndObject(_) => self.state = TorrentBuilderState::Files,
 
                         _ => {
                             return Err(TorrentFileError::ExpectedKey {
@@ -259,7 +264,7 @@ impl<'builder> TorrentBuilder<'builder> {
                         Token::String(path) => self.handle_file_path(path, &mut torrent)?,
 
                         // stepping back by one state:
-                        Token::EndObject => self.state = TorrentBuilderState::SingularFile,
+                        Token::EndObject(_) => self.state = TorrentBuilderState::SingularFile,
 
                         _ => {
                             return Err(TorrentFileError::ExpectedKey {
@@ -283,11 +288,27 @@ impl<'builder> TorrentBuilder<'builder> {
     ) -> Result<(), TorrentFileError> {
         match &*key {
             b"announce" => self.handle_announce(dec, torrent),
+
             b"info" => {
                 self.state = TorrentBuilderState::Info;
-                dec.next_token()?; // skipping the 'd'
-                Ok(())
+
+                let token = dec.next_token()?;
+
+                match token {
+                    Token::BeginDict(pos) => {
+                        torrent.info.begin_pos = pos;
+                        Ok(())
+                    }
+                    _ => {
+                        return Err(TorrentFileError::UnexpectedTypeForKey {
+                            key: TorrentKey::Info,
+                            expected: TokenKind::BeginDict,
+                            got: token.into(),
+                        });
+                    }
+                }
             }
+
             _ => self.skip_value(dec),
         }
     }
@@ -447,7 +468,7 @@ impl<'builder> TorrentBuilder<'builder> {
 
                 let token = dec.next_token()?;
                 match token {
-                    Token::BeginList => Ok(()),
+                    Token::BeginList(_) => Ok(()),
                     _ => {
                         return Err(TorrentFileError::UnexpectedTypeForKey {
                             key: TorrentKey::FilesPath,
@@ -515,8 +536,8 @@ impl<'builder> TorrentBuilder<'builder> {
     fn skip_value(&self, dec: &mut Decoder) -> Result<(), TorrentFileError> {
         match dec.next_token()? {
             Token::Int(_) | Token::String(_) => Ok(()), // already skipped
-            Token::EndObject => return Err(TorrentFileError::UnexpectedObjectClosure),
-            Token::BeginDict | Token::BeginList => self.skip_nested_value(dec),
+            Token::EndObject(_) => return Err(TorrentFileError::UnexpectedObjectClosure),
+            Token::BeginDict(_) | Token::BeginList(_) => self.skip_nested_value(dec),
         }
     }
 
@@ -527,8 +548,8 @@ impl<'builder> TorrentBuilder<'builder> {
         while counter != 0 {
             match dec.next_token()? {
                 Token::Int(_) | Token::String(_) => continue,
-                Token::EndObject => counter -= 1,
-                Token::BeginDict | Token::BeginList => counter += 1,
+                Token::BeginDict(_) | Token::BeginList(_) => counter += 1,
+                Token::EndObject(_) => counter -= 1,
             }
         }
 

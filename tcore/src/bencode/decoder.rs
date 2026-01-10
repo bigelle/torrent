@@ -7,9 +7,9 @@ use thiserror::Error;
 pub enum Token<'a> {
     Int(i64),
     String(Cow<'a, [u8]>),
-    BeginDict, //Cumberbatch
-    BeginList,
-    EndObject,
+    BeginDict(usize), //Cumberbatch
+    BeginList(usize),
+    EndObject(usize),
 }
 
 #[derive(Debug)]
@@ -38,9 +38,9 @@ impl<'a> From<Token<'a>> for TokenKind {
         match value {
             Token::Int(_) => TokenKind::Int,
             Token::String(_) => TokenKind::String,
-            Token::BeginDict => TokenKind::BeginDict,
-            Token::BeginList => TokenKind::BeginList,
-            Token::EndObject => TokenKind::EndObject,
+            Token::BeginDict(_) => TokenKind::BeginDict,
+            Token::BeginList(_) => TokenKind::BeginList,
+            Token::EndObject(_) => TokenKind::EndObject,
         }
     }
 }
@@ -83,9 +83,9 @@ impl<'a> Decoder<'a> {
         match self.current_byte() {
             b'i' => self.give_int_token(),
             b'0'..=b'9' => self.give_string_token(),
-            b'l' => Ok((Token::BeginList, 1)),
-            b'd' => Ok((Token::BeginDict, 1)),
-            b'e' => Ok((Token::EndObject, 1)),
+            b'l' => Ok((Token::BeginList(self.pos), 1)),
+            b'd' => Ok((Token::BeginDict(self.pos), 1)),
+            b'e' => Ok((Token::EndObject(self.pos), 1)),
             v => Err(DecodeError::UnknownToken(v)),
         }
     }
