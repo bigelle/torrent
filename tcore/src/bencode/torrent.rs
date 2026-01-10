@@ -1,9 +1,4 @@
-use std::{
-    borrow::Cow,
-    fmt::Display,
-    io::{BufRead, BufReader, Error, Read},
-    str::{self},
-};
+use std::{borrow::Cow, fmt::Display};
 
 use thiserror::Error;
 
@@ -62,7 +57,7 @@ impl Display for TorrentKey {
 #[derive(Error, Debug)]
 pub enum TorrentFileError {
     #[error("error reading .torrent file: {0}")]
-    Io(#[from] Error),
+    Io(#[from] std::io::Error),
     #[error("error while decoding .torrent file: {0}")]
     Decode(#[from] DecodeError),
     #[error("expected one of the {state} keys, got {got}")]
@@ -83,22 +78,19 @@ pub enum TorrentFileError {
     #[error("unexpected object closure")]
     UnexpectedObjectClosure,
     #[error("not valid UTF-8 when UTF-8 string is expected")]
-    Utf8(#[from] str::Utf8Error),
+    Utf8(#[from] std::str::Utf8Error),
 }
 
 impl Torrent {
-    pub fn from_file(src: &mut std::fs::File) -> Result<Torrent, TorrentFileError> {
-        let mut data: Vec<u8> = Vec::new();
-        src.read_to_end(&mut data)?;
-
-        let torrent_builder = TorrentBuilder::new(&data);
+    pub fn from_file(src: &[u8]) -> Result<Torrent, TorrentFileError> {
+        let torrent_builder = TorrentBuilder::new(&src);
         torrent_builder.build()
     }
 }
 
-struct TorrentBuilder<'a> {
+struct TorrentBuilder<'builder> {
     state: TorrentBuilderState,
-    src: &'a [u8],
+    src: &'builder [u8],
 }
 
 enum TorrentBuilderState {
@@ -164,8 +156,8 @@ impl Display for TorrentBuilderState {
     }
 }
 
-impl<'a> TorrentBuilder<'a> {
-    fn new(src: &'a [u8]) -> TorrentBuilder<'a> {
+impl<'builder> TorrentBuilder<'builder> {
+    fn new(src: &'builder [u8]) -> TorrentBuilder<'builder> {
         TorrentBuilder {
             state: TorrentBuilderState::Begin,
             src,
@@ -249,6 +241,7 @@ impl<'a> TorrentBuilder<'a> {
                     match token {
                         Token::String(key) => self.handle_file_keys(key, &mut dec, &mut torrent)?,
 
+                        // stepping back by one state:
                         Token::EndObject => self.state = TorrentBuilderState::Files,
 
                         _ => {
@@ -265,6 +258,7 @@ impl<'a> TorrentBuilder<'a> {
                     match token {
                         Token::String(path) => self.handle_file_path(path, &mut torrent)?,
 
+                        // stepping back by one state:
                         Token::EndObject => self.state = TorrentBuilderState::SingularFile,
 
                         _ => {
@@ -281,10 +275,10 @@ impl<'a> TorrentBuilder<'a> {
         }
     }
 
-    fn handle_meta_keys<'b>(
+    fn handle_meta_keys(
         &mut self,
-        key: Cow<'b, [u8]>,
-        dec: &mut Decoder<'b>,
+        key: Cow<'builder, [u8]>,
+        dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         match &*key {
@@ -298,9 +292,9 @@ impl<'a> TorrentBuilder<'a> {
         }
     }
 
-    fn handle_announce<'b>(
+    fn handle_announce(
         &self,
-        dec: &mut Decoder<'b>,
+        dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         let token = dec.next_token()?;
@@ -322,9 +316,9 @@ impl<'a> TorrentBuilder<'a> {
         Ok(())
     }
 
-    fn handle_info_keys<'b>(
+    fn handle_info_keys(
         &mut self,
-        key: Cow<'b, [u8]>,
+        key: Cow<'builder, [u8]>,
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
@@ -350,9 +344,9 @@ impl<'a> TorrentBuilder<'a> {
         }
     }
 
-    fn handle_name<'b>(
+    fn handle_name(
         &self,
-        dec: &mut Decoder<'b>,
+        dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         let token = dec.next_token()?;
@@ -373,9 +367,9 @@ impl<'a> TorrentBuilder<'a> {
         Ok(())
     }
 
-    fn handle_piece_length<'b>(
+    fn handle_piece_length(
         &self,
-        dec: &mut Decoder<'b>,
+        dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         let token = dec.next_token()?;
@@ -395,9 +389,9 @@ impl<'a> TorrentBuilder<'a> {
         Ok(())
     }
 
-    fn handle_pieces<'b>(
+    fn handle_pieces(
         &self,
-        dec: &mut Decoder<'b>,
+        dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         let token = dec.next_token()?;
@@ -417,9 +411,9 @@ impl<'a> TorrentBuilder<'a> {
         Ok(())
     }
 
-    fn handle_length<'b>(
+    fn handle_length(
         &self,
-        dec: &mut Decoder<'b>,
+        dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         let token = dec.next_token()?;
@@ -439,19 +433,31 @@ impl<'a> TorrentBuilder<'a> {
         Ok(())
     }
 
-    fn handle_file_keys<'b>(
+    fn handle_file_keys(
         &mut self,
-        key: Cow<'b, [u8]>,
+        key: Cow<'builder, [u8]>,
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         match &*key {
             b"length" => self.handle_file_length(dec, torrent),
+
             b"path" => {
                 self.state = TorrentBuilderState::SingularFilePath;
-                dec.next_token()?; // skipping the 'l' token FIXME: must check if it's really 'l'
-                Ok(())
+
+                let token = dec.next_token()?;
+                match token {
+                    Token::BeginList => Ok(()),
+                    _ => {
+                        return Err(TorrentFileError::UnexpectedTypeForKey {
+                            key: TorrentKey::FilesPath,
+                            expected: TokenKind::BeginList,
+                            got: token.into(),
+                        });
+                    }
+                }
             }
+
             _ => self.skip_value(dec),
         }
     }
@@ -486,9 +492,9 @@ impl<'a> TorrentBuilder<'a> {
         Ok(())
     }
 
-    fn handle_file_path<'b>(
+    fn handle_file_path(
         &self,
-        path: Cow<'b, [u8]>,
+        path: Cow<'builder, [u8]>,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
         let path = String::from_utf8(path.into_owned()).map_err(|e| e.utf8_error())?;
@@ -539,7 +545,7 @@ mod test_torrent {
 
     #[test]
     fn valid_bep_003_single_file_torrent() {
-        let mut data = fs::File::open("../test_data/fixtures/single_bep_003.torrent")
+        let mut data = fs::read("../test_data/fixtures/single_bep_003.torrent")
             .expect("file must be opened and read");
 
         let res = Torrent::from_file(&mut data);
@@ -548,7 +554,7 @@ mod test_torrent {
 
     #[test]
     fn valid_bep_003_multi_file_torrent() {
-        let mut data = fs::File::open("../test_data/fixtures/multi_bep_003.torrent")
+        let mut data = fs::read("../test_data/fixtures/multi_bep_003.torrent")
             .expect("file must be opened and read");
 
         Torrent::from_file(&mut data).unwrap();

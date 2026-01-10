@@ -17,7 +17,7 @@ fn main() {
 
     let path = &args[1];
 
-    let mut file = fs::File::open(path).expect("file must be available for reading");
+    let file = fs::read(path).expect("file must be available for reading");
 
-    Torrent::from_file(&mut file).expect("torrent file must be parsed");
+    Torrent::from_file(&file).expect("torrent file must be parsed");
 }
