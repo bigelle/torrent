@@ -2,6 +2,8 @@ use std::{borrow::Cow, fmt::Display};
 
 use thiserror::Error;
 
+use crate::cryptos::hash::make_sha1;
+
 use super::decoder::{DecodeError, Decoder, Token, TokenKind};
 
 #[derive(Default, Debug)]
@@ -30,14 +32,12 @@ impl Torrent {
 
 #[derive(Default, Debug, PartialEq)]
 pub struct Info {
-    // both are for info hash
-    begin_pos: usize,
-    end_pos: usize,
+    info_hash: [u8; 20],
 
     name: String,
-    piece_length: usize,
+    piece_length: u64,
     pieces: Vec<u8>,
-    length: Option<usize>,
+    length: Option<u64>,
     files: Option<Vec<File>>,
 }
 
@@ -62,6 +62,10 @@ impl Info {
                 state: TorrentBuilderStateKind::Info,
                 key: TorrentKey::InfoPieces,
             });
+        }
+
+        if self.pieces.len() % 20 != 0 {
+            return Err(TorrentFileError::InvalidPiecesLength(self.pieces.len()));
         }
 
         if self.length.is_none() && self.files.is_none() {
@@ -140,6 +144,8 @@ pub enum TorrentFileError {
     UnexpectedObjectClosure,
     #[error("not valid UTF-8 when UTF-8 string is expected")]
     Utf8(#[from] std::str::Utf8Error),
+    #[error("pieces has invalid length of {0} which is not divisible by 20")]
+    InvalidPiecesLength(usize),
 }
 
 impl Torrent {
@@ -152,6 +158,7 @@ impl Torrent {
 struct TorrentBuilder<'builder> {
     state: TorrentBuilderState,
     src: &'builder [u8],
+    info_begin: usize,
 }
 
 enum TorrentBuilderState {
@@ -221,6 +228,7 @@ impl<'builder> TorrentBuilder<'builder> {
     fn new(src: &'builder [u8]) -> TorrentBuilder<'builder> {
         TorrentBuilder {
             state: TorrentBuilderState::Begin,
+            info_begin: 0,
             src,
         }
     }
@@ -261,7 +269,7 @@ impl<'builder> TorrentBuilder<'builder> {
 
                         // stepping back by one state:
                         Token::EndObject(pos) => {
-                            torrent.info.end_pos = pos;
+                            torrent.info.info_hash = make_sha1(self.get_info_slice(pos));
                             torrent.info.is_valid()?;
                             self.state = TorrentBuilderState::MetaInfo
                         }
@@ -354,21 +362,12 @@ impl<'builder> TorrentBuilder<'builder> {
             b"info" => {
                 self.state = TorrentBuilderState::Info;
 
-                let token = dec.next_token()?;
-
-                match token {
-                    Token::BeginDict(pos) => {
-                        torrent.info.begin_pos = pos;
-                        Ok(())
-                    }
-                    _ => {
-                        return Err(TorrentFileError::UnexpectedTypeForKey {
-                            key: TorrentKey::Info,
-                            expected: TokenKind::BeginDict,
-                            got: token.into(),
-                        });
-                    }
-                }
+                self.info_begin =
+                    expect_extract(dec, TorrentKey::Info, TokenKind::BeginDict, |t| match t {
+                        Token::BeginDict(i) => Some(*i as usize),
+                        _ => None,
+                    })?;
+                Ok(())
             }
 
             _ => self.skip_value(dec),
@@ -399,6 +398,10 @@ impl<'builder> TorrentBuilder<'builder> {
         Ok(())
     }
 
+    fn get_info_slice(&self, end_pos: usize) -> &[u8] {
+        return &self.src[self.info_begin..end_pos + 1];
+    }
+
     fn handle_info_keys(
         &mut self,
         key: Cow<'builder, [u8]>,
@@ -421,20 +424,9 @@ impl<'builder> TorrentBuilder<'builder> {
                 }
                 self.state = TorrentBuilderState::Files;
 
-                let token = dec.next_token()?;
-
-                match token {
-                    Token::BeginList(_) => (),
-                    _ => {
-                        return Err(TorrentFileError::UnexpectedTypeForKey {
-                            key: TorrentKey::InfoFiles,
-                            expected: TokenKind::BeginList,
-                            got: token.into(),
-                        });
-                    }
-                }
-
-                Ok(())
+                expect_token(dec, TorrentKey::InfoFiles, TokenKind::BeginList, |t| {
+                    matches!(t, Token::BeginList(_))
+                })
             }
             _ => self.skip_value(dec),
         }
@@ -468,20 +460,13 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let token = dec.next_token()?;
+        let piece_length =
+            expect_extract(dec, TorrentKey::InfoLength, TokenKind::Int, |t| match t {
+                Token::Int(i) => Some(*i),
+                _ => None,
+            })?;
 
-        let piece_length = match token {
-            Token::Int(len) => len,
-            _ => {
-                return Err(TorrentFileError::UnexpectedTypeForKey {
-                    key: TorrentKey::InfoPieceLength,
-                    expected: TokenKind::Int,
-                    got: token.into(),
-                });
-            }
-        };
-
-        torrent.info.piece_length = piece_length as usize;
+        torrent.info.piece_length = piece_length as u64;
         Ok(())
     }
 
@@ -493,7 +478,7 @@ impl<'builder> TorrentBuilder<'builder> {
         let token = dec.next_token()?;
 
         let pieces = match token {
-            Token::String(url) => url,
+            Token::String(pieces) => pieces,
             _ => {
                 return Err(TorrentFileError::UnexpectedTypeForKey {
                     key: TorrentKey::InfoPieces,
@@ -503,7 +488,7 @@ impl<'builder> TorrentBuilder<'builder> {
             }
         };
 
-        torrent.info.pieces = pieces.into_owned();
+        torrent.info.pieces = pieces.to_vec();
         Ok(())
     }
 
@@ -512,20 +497,12 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let token = dec.next_token()?;
+        let len = expect_extract(dec, TorrentKey::InfoLength, TokenKind::Int, |t| match t {
+            Token::Int(i) => Some(*i),
+            _ => None,
+        })?;
 
-        let length = match token {
-            Token::Int(len) => len,
-            _ => {
-                return Err(TorrentFileError::UnexpectedTypeForKey {
-                    key: TorrentKey::InfoLength,
-                    expected: TokenKind::Int,
-                    got: token.into(),
-                });
-            }
-        };
-
-        torrent.info.length = Some(length as usize);
+        torrent.info.length = Some(len as u64);
         Ok(())
     }
 
@@ -541,17 +518,9 @@ impl<'builder> TorrentBuilder<'builder> {
             b"path" => {
                 self.state = TorrentBuilderState::SingularFilePath;
 
-                let token = dec.next_token()?;
-                match token {
-                    Token::BeginList(_) => Ok(()),
-                    _ => {
-                        return Err(TorrentFileError::UnexpectedTypeForKey {
-                            key: TorrentKey::FilesPath,
-                            expected: TokenKind::BeginList,
-                            got: token.into(),
-                        });
-                    }
-                }
+                expect_token(dec, TorrentKey::FilesPath, TokenKind::BeginList, |t| {
+                    matches!(t, Token::BeginList(_))
+                })
             }
 
             _ => self.skip_value(dec),
@@ -563,25 +532,17 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let token = dec.next_token()?;
-
-        let length = match token {
-            Token::Int(len) => len,
-            _ => {
-                return Err(TorrentFileError::UnexpectedTypeForKey {
-                    key: TorrentKey::FilesLength,
-                    expected: TokenKind::Int,
-                    got: token.into(),
-                });
-            }
-        };
+        let length = expect_extract(dec, TorrentKey::FilesLength, TokenKind::Int, |t| match t {
+            Token::Int(i) => Some(*i as usize),
+            _ => None,
+        })?;
 
         let files = torrent.info.files.as_mut().unwrap();
         match files.last_mut() {
-            Some(file) => file.length = length as usize,
+            Some(file) => file.length = length,
             None => {
                 let mut file = File::default();
-                file.length = length as usize;
+                file.length = length;
                 files.push(file);
             }
         }
@@ -632,6 +593,45 @@ impl<'builder> TorrentBuilder<'builder> {
     }
 }
 
+fn expect_token<F>(
+    dec: &mut Decoder,
+    key: TorrentKey,
+    expected: TokenKind,
+    ok: F,
+) -> Result<(), TorrentFileError>
+where
+    F: FnOnce(&Token) -> bool,
+{
+    let token = dec.next_token()?;
+    if ok(&token) {
+        Ok(())
+    } else {
+        Err(TorrentFileError::UnexpectedTypeForKey {
+            key,
+            expected,
+            got: token.into(),
+        })
+    }
+}
+
+fn expect_extract<T>(
+    dec: &mut Decoder,
+    key: TorrentKey,
+    expected: TokenKind,
+    f: impl FnOnce(&Token) -> Option<T>,
+) -> Result<T, TorrentFileError> {
+    let token = dec.next_token()?;
+    if let Some(v) = f(&token) {
+        Ok(v)
+    } else {
+        Err(TorrentFileError::UnexpectedTypeForKey {
+            key,
+            expected,
+            got: token.into(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod test_torrent {
 
@@ -658,6 +658,33 @@ mod test_torrent {
             .expect("file must be opened and read");
 
         Torrent::from_file(&mut data).unwrap();
+    }
+
+    #[test]
+    fn get_info_slice_returns_info_dict_bytes() {
+        let info_bytes = concat(&[
+            b"d",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"6:lengthi123e",
+            b"e",
+        ]);
+
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"4:info",
+            info_bytes.as_slice(),
+            b"e",
+        ]);
+
+        let mut builder = TorrentBuilder::new(&data);
+        let info_begin = data.len() - info_bytes.len() - 1;
+        builder.info_begin = info_begin;
+
+        let end_pos = info_begin + info_bytes.len() - 1;
+        assert_eq!(builder.get_info_slice(end_pos), info_bytes.as_slice());
     }
 
     #[test]
