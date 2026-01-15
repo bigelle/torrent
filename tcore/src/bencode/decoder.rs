@@ -267,4 +267,91 @@ mod test_decode {
             DecodeError::UnfinishedString(0, 4, 3)
         ))
     }
+
+    #[test]
+    fn valid_int_variants() {
+        let mut dec = Decoder::new(b"i0ei-1e");
+
+        assert_eq!(dec.next_token().unwrap(), Token::Int(0));
+        assert_eq!(dec.next_token().unwrap(), Token::Int(-1));
+    }
+
+    #[test]
+    fn valid_empty_string_token() {
+        let mut dec = Decoder::new(b"0:");
+
+        assert_eq!(
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b""))
+        );
+    }
+
+    #[test]
+    fn valid_list_tokens() {
+        let mut dec = Decoder::new(b"li1e3:abce");
+
+        assert!(matches!(dec.next_token().unwrap(), Token::BeginList(0)));
+        assert_eq!(dec.next_token().unwrap(), Token::Int(1));
+        assert_eq!(
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b"abc"))
+        );
+        assert!(matches!(dec.next_token().unwrap(), Token::EndObject(9)));
+    }
+
+    #[test]
+    fn valid_dict_tokens() {
+        let mut dec = Decoder::new(b"d3:foo3:bare");
+
+        assert!(matches!(dec.next_token().unwrap(), Token::BeginDict(0)));
+        assert_eq!(
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b"foo"))
+        );
+        assert_eq!(
+            dec.next_token().unwrap(),
+            Token::String(Cow::Borrowed(b"bar"))
+        );
+        assert!(matches!(dec.next_token().unwrap(), Token::EndObject(11)));
+    }
+
+    #[test]
+    fn error_unknown_token() {
+        let mut dec = Decoder::new(b"x");
+
+        assert!(matches!(
+            dec.next_token().unwrap_err(),
+            DecodeError::UnknownToken(b'x')
+        ));
+    }
+
+    #[test]
+    fn error_string_missing_colon() {
+        let mut dec = Decoder::new(b"4test");
+
+        assert!(matches!(
+            dec.next_token().unwrap_err(),
+            DecodeError::MissingColonInString
+        ));
+    }
+
+    #[test]
+    fn error_wrong_int_syntax() {
+        let mut dec = Decoder::new(b"i4xe");
+
+        assert!(matches!(
+            dec.next_token().unwrap_err(),
+            DecodeError::WrongSyntax
+        ));
+    }
+
+    #[test]
+    fn error_wrong_string_syntax() {
+        let mut dec = Decoder::new(b"3x:abc");
+
+        assert!(matches!(
+            dec.next_token().unwrap_err(),
+            DecodeError::WrongSyntax
+        ));
+    }
 }

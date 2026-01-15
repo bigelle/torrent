@@ -10,7 +10,25 @@ pub struct Torrent {
     info: Info,
 }
 
-#[derive(Default, Debug)]
+impl Torrent {
+    fn is_valid(&self) -> Result<(), TorrentFileError> {
+        if self.announce.is_empty() {
+            return Err(TorrentFileError::MissingRequiredKey {
+                state: TorrentBuilderStateKind::MetaInfo,
+                key: TorrentKey::Announce,
+            });
+        }
+        if self.info == Info::default() {
+            return Err(TorrentFileError::MissingRequiredKey {
+                state: TorrentBuilderStateKind::MetaInfo,
+                key: TorrentKey::Info,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default, Debug, PartialEq)]
 pub struct Info {
     // both are for info hash
     begin_pos: usize,
@@ -23,7 +41,41 @@ pub struct Info {
     files: Option<Vec<File>>,
 }
 
-#[derive(Default, Debug)]
+impl Info {
+    fn is_valid(&self) -> Result<(), TorrentFileError> {
+        if self.name.is_empty() {
+            return Err(TorrentFileError::MissingRequiredKey {
+                state: TorrentBuilderStateKind::Info,
+                key: TorrentKey::InfoName,
+            });
+        }
+
+        if self.piece_length == 0 {
+            return Err(TorrentFileError::MissingRequiredKey {
+                state: TorrentBuilderStateKind::Info,
+                key: TorrentKey::InfoPieceLength,
+            });
+        }
+
+        if self.pieces.is_empty() {
+            return Err(TorrentFileError::MissingRequiredKey {
+                state: TorrentBuilderStateKind::Info,
+                key: TorrentKey::InfoPieces,
+            });
+        }
+
+        if self.length.is_none() && self.files.is_none() {
+            return Err(TorrentFileError::MissingRequiredKey {
+                state: TorrentBuilderStateKind::Info,
+                key: TorrentKey::InfoFiles,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Default, Debug, PartialEq)]
 pub struct File {
     length: usize,
     path: Vec<String>,
@@ -68,6 +120,11 @@ pub enum TorrentFileError {
     ExpectedKey {
         state: TorrentBuilderStateKind,
         got: TokenKind,
+    },
+    #[error("{state} is missing {key}")]
+    MissingRequiredKey {
+        state: TorrentBuilderStateKind,
+        key: TorrentKey,
     },
     #[error("'files' and 'length' keys are mutually exclusive")]
     MutualExclusiveKeys,
@@ -205,6 +262,7 @@ impl<'builder> TorrentBuilder<'builder> {
                         // stepping back by one state:
                         Token::EndObject(pos) => {
                             torrent.info.end_pos = pos;
+                            torrent.info.is_valid()?;
                             self.state = TorrentBuilderState::MetaInfo
                         }
 
@@ -267,15 +325,19 @@ impl<'builder> TorrentBuilder<'builder> {
                         Token::EndObject(_) => self.state = TorrentBuilderState::SingularFile,
 
                         _ => {
-                            return Err(TorrentFileError::ExpectedKey {
-                                state: self.state.into(),
+                            return Err(TorrentFileError::UnexpectedTypeForKey {
+                                key: TorrentKey::FilesPath,
+                                expected: TokenKind::String,
                                 got: token.into(),
                             });
                         }
                     }
                 }
 
-                TorrentBuilderState::Finished => return Ok(torrent),
+                TorrentBuilderState::Finished => {
+                    torrent.is_valid()?;
+                    return Ok(torrent);
+                }
             }
         }
     }
@@ -358,7 +420,20 @@ impl<'builder> TorrentBuilder<'builder> {
                     return Err(TorrentFileError::MutualExclusiveKeys);
                 }
                 self.state = TorrentBuilderState::Files;
-                dec.next_token()?; // skipping 'l' token
+
+                let token = dec.next_token()?;
+
+                match token {
+                    Token::BeginList(_) => (),
+                    _ => {
+                        return Err(TorrentFileError::UnexpectedTypeForKey {
+                            key: TorrentKey::InfoFiles,
+                            expected: TokenKind::BeginList,
+                            got: token.into(),
+                        });
+                    }
+                }
+
                 Ok(())
             }
             _ => self.skip_value(dec),
@@ -564,6 +639,10 @@ mod test_torrent {
 
     use super::*;
 
+    fn concat(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
     #[test]
     fn valid_bep_003_single_file_torrent() {
         let mut data = fs::read("../test_data/fixtures/single_bep_003.torrent")
@@ -579,5 +658,168 @@ mod test_torrent {
             .expect("file must be opened and read");
 
         Torrent::from_file(&mut data).unwrap();
+    }
+
+    #[test]
+    fn unknown_root_keys_are_ignored() {
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"5:extra",
+            b"l",
+            b"i1e",
+            b"i2e",
+            b"e",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"6:lengthi123e",
+            b"e",
+            b"e",
+        ]);
+
+        let res = Torrent::from_file(&data);
+        assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
+    }
+
+    #[test]
+    fn unknown_info_keys_are_ignored() {
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"6:lengthi123e",
+            b"3:extd3:foo3:baree",
+            b"e",
+            b"e",
+        ]);
+
+        let res = Torrent::from_file(&data);
+        assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
+    }
+
+    #[test]
+    fn unknown_file_keys_are_ignored() {
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"5:filesl",
+            b"d",
+            b"6:lengthi10e",
+            b"4:pathl3:foo3:bare",
+            b"5:extrad3:fooi1ee",
+            b"e",
+            b"e",
+            b"e",
+            b"e",
+        ]);
+
+        let res = Torrent::from_file(&data);
+        assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
+    }
+
+    #[test]
+    fn error_on_files_and_length_in_info() {
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"6:lengthi123e",
+            b"5:filesle",
+            b"e",
+            b"e",
+        ]);
+
+        let err = Torrent::from_file(&data).unwrap_err();
+        assert!(matches!(err, TorrentFileError::MutualExclusiveKeys));
+    }
+
+    #[test]
+    fn error_on_invalid_announce_type() {
+        let data = concat(&[
+            b"d",
+            b"8:announcei1e",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"6:lengthi123e",
+            b"e",
+            b"e",
+        ]);
+
+        let err = Torrent::from_file(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            TorrentFileError::UnexpectedTypeForKey {
+                key: TorrentKey::Announce,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn error_on_invalid_file_path_type() {
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:pieces20:12345678901234567890",
+            b"5:filesl",
+            b"d",
+            b"6:lengthi10e",
+            b"4:pathi1e",
+            b"e",
+            b"e",
+            b"e",
+            b"e",
+        ]);
+
+        let err = Torrent::from_file(&data).unwrap_err();
+        assert!(matches!(
+            err,
+            TorrentFileError::UnexpectedTypeForKey {
+                key: TorrentKey::FilesPath,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn error_on_missing_info_dict() {
+        let data = concat(&[b"d", b"8:announce14:http://tracker", b"e"]);
+
+        let res = Torrent::from_file(&data);
+        assert!(res.is_err(), "expected error for missing info dict");
+    }
+
+    #[test]
+    fn error_on_missing_pieces() {
+        let data = concat(&[
+            b"d",
+            b"8:announce14:http://tracker",
+            b"4:infod",
+            b"4:name4:test",
+            b"12:piece lengthi16384e",
+            b"6:lengthi123e",
+            b"e",
+            b"e",
+        ]);
+
+        let res = Torrent::from_file(&data);
+        assert!(res.is_err(), "expected error for missing pieces");
     }
 }
