@@ -104,7 +104,7 @@ impl<'a> Decoder<'a> {
             None => return Err(DecodeError::UnfinishedInt),
         };
 
-        if e_pos - 1 > 12 {
+        if e_pos - 1 > 21 {
             return Err(DecodeError::TokenTooLarge);
         }
 
@@ -128,8 +128,7 @@ impl<'a> Decoder<'a> {
             None => return Err(DecodeError::MissingColonInString),
         };
 
-        if col_pos > 12 {
-            // who needs a trillion of bytes?
+        if col_pos > 21 {
             return Err(DecodeError::TokenTooLarge);
         }
 
@@ -189,8 +188,12 @@ mod test_decode {
 
     #[test]
     fn error_int_too_large() {
-        let input = b"i1000000000000e"; // more than 999_999_999_999 by one
-        let mut dec = Decoder::new(input);
+        let mut input: Vec<u8> = Vec::from(b"i1");
+
+        input.extend_from_slice(&b"0".repeat(21));
+        input.push(b'e');
+
+        let mut dec = Decoder::new(&input);
 
         assert!(matches!(
             dec.next_token().unwrap_err(),
@@ -200,7 +203,7 @@ mod test_decode {
 
     #[test]
     fn error_int_is_not_finished() {
-        let input = b"i42"; // more than 999_999_999_999 by one
+        let input = b"i42"; 
         let mut dec = Decoder::new(input);
 
         assert!(matches!(
@@ -238,16 +241,8 @@ mod test_decode {
 
     #[test]
     fn error_string_too_large() {
-        const PREFIX: &[u8] = b"1000000000000:";
-        const TOTAL_LEN: usize = 1_000_000_014;
-
-        let mut input = Vec::with_capacity(1_000_000_014);
-
-        // prefix
-        input.extend_from_slice(PREFIX);
-
-        // fill with 's'
-        input.resize(TOTAL_LEN, b's');
+        // 22 digits -> exceeds limit of 21
+        let input: &[u8] = b"1000000000000000000000:"; // 10^21
 
         let mut dec = Decoder::new(&input);
 
@@ -280,10 +275,7 @@ mod test_decode {
     fn valid_empty_string_token() {
         let mut dec = Decoder::new(b"0:");
 
-        assert_eq!(
-            dec.next_token().unwrap(),
-            Token::String(Cow::Borrowed(b""))
-        );
+        assert_eq!(dec.next_token().unwrap(), Token::String(Cow::Borrowed(b"")));
     }
 
     #[test]
