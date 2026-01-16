@@ -1,4 +1,5 @@
-use std::{borrow::Cow, fmt::Display};
+#![warn(clippy::all)]
+use std::{borrow::Cow, fmt::Display, fs};
 
 use thiserror::Error;
 
@@ -64,7 +65,7 @@ impl Info {
             });
         }
 
-        if self.pieces.len() % 20 != 0 {
+        if !self.pieces.len().is_multiple_of(20) {
             return Err(TorrentFileError::InvalidPiecesLength(self.pieces.len()));
         }
 
@@ -149,8 +150,14 @@ pub enum TorrentFileError {
 }
 
 impl Torrent {
-    pub fn from_file(src: &[u8]) -> Result<Torrent, TorrentFileError> {
-        let torrent_builder = TorrentBuilder::new(&src);
+    pub fn from_file(path: &str) -> Result<Torrent, TorrentFileError> {
+        let data = fs::read(path)?;
+        let torrent_builder = TorrentBuilder::new(&data);
+        torrent_builder.build()
+    }
+
+    pub fn from_bytes(src: &[u8]) -> Result<Torrent, TorrentFileError> {
+        let torrent_builder = TorrentBuilder::new(src);
         torrent_builder.build()
     }
 }
@@ -364,7 +371,7 @@ impl<'builder> TorrentBuilder<'builder> {
 
                 self.info_begin =
                     expect_extract(dec, TorrentKey::Info, TokenKind::BeginDict, |t| match t {
-                        Token::BeginDict(i) => Some(*i as usize),
+                        Token::BeginDict(i) => Some(*i),
                         _ => None,
                     })?;
                 Ok(())
@@ -379,19 +386,19 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let announce_url = expect_extract(dec, TorrentKey::Announce, TokenKind::String, |t| match t{
-            Token::String(cow) => Some(cow.clone().into_owned()),
-            _ => None,
-        })?;
-
         let announce_url =
-            String::from_utf8(announce_url).map_err(|e| e.utf8_error())?;
+            expect_extract(dec, TorrentKey::Announce, TokenKind::String, |t| match t {
+                Token::String(cow) => Some(cow.clone().into_owned()),
+                _ => None,
+            })?;
+
+        let announce_url = String::from_utf8(announce_url).map_err(|e| e.utf8_error())?;
         torrent.announce = announce_url;
         Ok(())
     }
 
     fn get_info_slice(&self, end_pos: usize) -> &[u8] {
-        return &self.src[self.info_begin..end_pos + 1];
+        &self.src[self.info_begin..end_pos + 1]
     }
 
     fn handle_info_keys(
@@ -459,10 +466,15 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let pieces = expect_extract(dec, TorrentKey::InfoPieces, TokenKind::String, |t| match t {
-            Token::String(cow) => Some(cow.clone().into_owned()),
-            _ => None,
-        })?;
+        let pieces = expect_extract(
+            dec,
+            TorrentKey::InfoPieces,
+            TokenKind::String,
+            |t| match t {
+                Token::String(cow) => Some(cow.clone().into_owned()),
+                _ => None,
+            },
+        )?;
 
         torrent.info.pieces = pieces;
         Ok(())
@@ -517,9 +529,10 @@ impl<'builder> TorrentBuilder<'builder> {
         match files.last_mut() {
             Some(file) => file.length = length,
             None => {
-                let mut file = File::default();
-                file.length = length;
-                files.push(file);
+                files.push(File {
+                    length,
+                    path: Vec::new(),
+                });
             }
         }
         Ok(())
@@ -548,7 +561,7 @@ impl<'builder> TorrentBuilder<'builder> {
     fn skip_value(&self, dec: &mut Decoder) -> Result<(), TorrentFileError> {
         match dec.next_token()? {
             Token::Int(_) | Token::String(_) => Ok(()), // already skipped
-            Token::EndObject(_) => return Err(TorrentFileError::UnexpectedObjectClosure),
+            Token::EndObject(_) => Err(TorrentFileError::UnexpectedObjectClosure),
             Token::BeginDict(_) | Token::BeginList(_) => self.skip_nested_value(dec),
         }
     }
@@ -624,7 +637,7 @@ mod test_torrent {
         let mut data = fs::read("../test_data/fixtures/single_bep_003.torrent")
             .expect("file must be opened and read");
 
-        let res = Torrent::from_file(&mut data);
+        let res = Torrent::from_bytes(&mut data);
         assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
     }
 
@@ -633,7 +646,7 @@ mod test_torrent {
         let mut data = fs::read("../test_data/fixtures/multi_bep_003.torrent")
             .expect("file must be opened and read");
 
-        Torrent::from_file(&mut data).unwrap();
+        Torrent::from_bytes(&mut data).unwrap();
     }
 
     #[test]
@@ -682,7 +695,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let res = Torrent::from_file(&data);
+        let res = Torrent::from_bytes(&data);
         assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
     }
 
@@ -701,7 +714,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let res = Torrent::from_file(&data);
+        let res = Torrent::from_bytes(&data);
         assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
     }
 
@@ -725,7 +738,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let res = Torrent::from_file(&data);
+        let res = Torrent::from_bytes(&data);
         assert!(res.is_ok(), "unexpected error: {:?}", res.err().unwrap());
     }
 
@@ -744,7 +757,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let err = Torrent::from_file(&data).unwrap_err();
+        let err = Torrent::from_bytes(&data).unwrap_err();
         assert!(matches!(err, TorrentFileError::MutualExclusiveKeys));
     }
 
@@ -762,7 +775,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let err = Torrent::from_file(&data).unwrap_err();
+        let err = Torrent::from_bytes(&data).unwrap_err();
         assert!(matches!(
             err,
             TorrentFileError::UnexpectedTypeForKey {
@@ -791,7 +804,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let err = Torrent::from_file(&data).unwrap_err();
+        let err = Torrent::from_bytes(&data).unwrap_err();
         assert!(matches!(
             err,
             TorrentFileError::UnexpectedTypeForKey {
@@ -805,7 +818,7 @@ mod test_torrent {
     fn error_on_missing_info_dict() {
         let data = concat(&[b"d", b"8:announce14:http://tracker", b"e"]);
 
-        let res = Torrent::from_file(&data);
+        let res = Torrent::from_bytes(&data);
         assert!(res.is_err(), "expected error for missing info dict");
     }
 
@@ -822,7 +835,7 @@ mod test_torrent {
             b"e",
         ]);
 
-        let res = Torrent::from_file(&data);
+        let res = Torrent::from_bytes(&data);
         assert!(res.is_err(), "expected error for missing pieces");
     }
 }

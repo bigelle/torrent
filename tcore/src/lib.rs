@@ -1,3 +1,4 @@
+#![warn(clippy::all)]
 pub mod bencode;
-pub mod networking;
+pub mod sessions;
 pub mod cryptos;

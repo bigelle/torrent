@@ -19,5 +19,5 @@ fn main() {
 
     let file = fs::read(path).expect("file must be available for reading");
 
-    Torrent::from_file(&file).expect("torrent file must be parsed");
+    Torrent::from_bytes(&file).expect("torrent file must be parsed");
 }

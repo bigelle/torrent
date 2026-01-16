@@ -1,3 +1,4 @@
+#![warn(clippy::all)]
 use std::{borrow::Cow, fmt::Display};
 
 use atoi::FromRadix10SignedChecked;
@@ -21,7 +22,7 @@ pub enum TokenKind {
     EndObject,
 }
 
-impl<'a> Display for TokenKind {
+impl Display for TokenKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::Int => write!(f, "Int"),
@@ -70,7 +71,7 @@ pub enum DecodeError {
 
 impl<'a> Decoder<'a> {
     pub fn new(src: &'a [u8]) -> Decoder<'a> {
-        Decoder { src: src, pos: 0 }
+        Decoder { src, pos: 0 }
     }
 
     pub fn next_token(&mut self) -> Result<Token<'a>, DecodeError> {
@@ -118,7 +119,7 @@ impl<'a> Decoder<'a> {
                 }
                 Ok((Token::Int(n), e_pos + 1))
             }
-            None => return Err(DecodeError::WrongSyntax),
+            None => Err(DecodeError::WrongSyntax),
         }
     }
 
@@ -147,7 +148,7 @@ impl<'a> Decoder<'a> {
             }
         } as usize;
 
-        let have = self.src[self.pos + col_pos + 1..].len() as usize;
+        let have = self.src[self.pos + col_pos + 1..].len();
         if have < length {
             return Err(DecodeError::UnfinishedString(self.pos, length, have));
         }

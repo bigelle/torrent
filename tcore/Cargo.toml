@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
 atoi = "2.0.0"
 bytes = "1.11.0"
 dhat = "0.3"
@@ -13,7 +14,7 @@ sha1 = "0.10.6"
 strum = "0.27.2"
 strum_macros = "0.27.2"
 thiserror = "2.0.17"
-tokio = "1.49.0"
+tokio = { version = "1.49.0", features = ["full"]}
 
 [profile.release]
 debug = true
