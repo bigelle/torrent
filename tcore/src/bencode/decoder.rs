@@ -132,12 +132,12 @@ impl<'a> Decoder<'a> {
             return Err(DecodeError::TokenTooLarge);
         }
 
-        let (maybe_len, size) =
+        let (maybe_len, used) =
             u64::from_radix_10_signed_checked(&self.src[self.pos..self.pos + col_pos]);
 
-        let size = match maybe_len {
+        let length = match maybe_len {
             Some(len) => {
-                if size != col_pos {
+                if used != col_pos {
                     return Err(DecodeError::WrongSyntax);
                 }
                 len
@@ -148,15 +148,15 @@ impl<'a> Decoder<'a> {
         } as usize;
 
         let have = self.src[self.pos + col_pos + 1..].len() as usize;
-        if have < size {
-            return Err(DecodeError::UnfinishedString(self.pos, size, have));
+        if have < length {
+            return Err(DecodeError::UnfinishedString(self.pos, length, have));
         }
 
         let token = Token::String(Cow::Borrowed(
-            &self.src[self.pos + col_pos + 1..self.pos + col_pos + size + 1],
+            &self.src[self.pos + col_pos + 1..self.pos + col_pos + length + 1],
         ));
 
-        Ok((token, col_pos + size + 1))
+        Ok((token, col_pos + length + 1))
     }
 
     fn current_byte(&self) -> u8 {

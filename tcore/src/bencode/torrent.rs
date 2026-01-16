@@ -379,21 +379,13 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let token = dec.next_token()?;
-
-        let announce_url = match token {
-            Token::String(url) => url,
-            _ => {
-                return Err(TorrentFileError::UnexpectedTypeForKey {
-                    key: TorrentKey::Announce,
-                    expected: TokenKind::String,
-                    got: token.into(),
-                });
-            }
-        };
+        let announce_url = expect_extract(dec, TorrentKey::Announce, TokenKind::String, |t| match t{
+            Token::String(cow) => Some(cow.clone().into_owned()),
+            _ => None,
+        })?;
 
         let announce_url =
-            String::from_utf8(announce_url.into_owned()).map_err(|e| e.utf8_error())?;
+            String::from_utf8(announce_url).map_err(|e| e.utf8_error())?;
         torrent.announce = announce_url;
         Ok(())
     }
@@ -437,20 +429,12 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let token = dec.next_token()?;
+        let name = expect_extract(dec, TorrentKey::InfoName, TokenKind::String, |t| match t {
+            Token::String(cow) => Some(cow.clone().into_owned()),
+            _ => None,
+        })?;
 
-        let name = match token {
-            Token::String(url) => url,
-            _ => {
-                return Err(TorrentFileError::UnexpectedTypeForKey {
-                    key: TorrentKey::InfoName,
-                    expected: TokenKind::String,
-                    got: token.into(),
-                });
-            }
-        };
-
-        let name = String::from_utf8(name.into_owned()).map_err(|e| e.utf8_error())?;
+        let name = String::from_utf8(name).map_err(|e| e.utf8_error())?;
         torrent.info.name = name;
         Ok(())
     }
@@ -475,20 +459,12 @@ impl<'builder> TorrentBuilder<'builder> {
         dec: &mut Decoder,
         torrent: &mut Torrent,
     ) -> Result<(), TorrentFileError> {
-        let token = dec.next_token()?;
+        let pieces = expect_extract(dec, TorrentKey::InfoPieces, TokenKind::String, |t| match t {
+            Token::String(cow) => Some(cow.clone().into_owned()),
+            _ => None,
+        })?;
 
-        let pieces = match token {
-            Token::String(pieces) => pieces,
-            _ => {
-                return Err(TorrentFileError::UnexpectedTypeForKey {
-                    key: TorrentKey::InfoPieces,
-                    expected: TokenKind::String,
-                    got: token.into(),
-                });
-            }
-        };
-
-        torrent.info.pieces = pieces.to_vec();
+        torrent.info.pieces = pieces;
         Ok(())
     }
 
