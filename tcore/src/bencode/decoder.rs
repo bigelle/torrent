@@ -76,7 +76,7 @@ impl<'a> Decoder<'a> {
 
     pub fn next_token(&mut self) -> Result<Token<'a>, DecodeError> {
         let (token, size) = self.peek_token()?;
-        self.step_forward(size)?;
+        self.step_forward_unchecked(size);
         Ok(token)
     }
 
@@ -95,8 +95,12 @@ impl<'a> Decoder<'a> {
         if self.pos + steps > self.src.len() {
             return Err(DecodeError::PosOutOfBounds);
         }
-        self.pos += steps;
+        self.step_forward_unchecked(steps);
         Ok(())
+    }
+
+    pub fn step_forward_unchecked(&mut self, steps: usize) {
+        self.pos +=steps;
     }
 
     fn give_int_token(&self) -> Result<(Token<'a>, usize), DecodeError> {

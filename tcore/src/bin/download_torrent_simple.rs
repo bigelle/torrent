@@ -10,8 +10,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let torrent = Torrent::from_file(&args[1])?;
 
-    let session = Session::new();
-    let tracker = session.download(&torrent).to(&args[2]).begin().await?;
+    let session = Session::make()
+        .await
+        .expect("there should be available ports");
+    let tracker = session.add_tracker(torrent).to(&args[2]).begin().await?;
 
     loop {
         let st = tracker.status();

@@ -160,6 +160,13 @@ impl Torrent {
         let torrent_builder = TorrentBuilder::new(src);
         torrent_builder.build()
     }
+
+    pub fn info_hash(&self) -> Option<[u8;20]> {
+        if self.info.info_hash.is_empty() {
+            return None
+        }
+        Some(self.info.info_hash)
+    }
 }
 
 struct TorrentBuilder<'builder> {

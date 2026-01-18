@@ -1,12 +1,18 @@
-use tokio::sync::{mpsc, watch};
+use tokio::{
+    sync::{mpsc, watch},
+};
 
-use crate::sessions::tracker::{Command, Status, TrackerBuilder};
+use crate::sessions::{
+    tracker::{Command, Status, TrackerBuilder},
+};
 
 pub(super) struct Downloader {
     builder: TrackerBuilder,
     status_tx: watch::Sender<Status>,
     command_rx: mpsc::Receiver<Command>,
     state: DownloaderState,
+
+    client: reqwest::Client,
 }
 
 enum DownloaderState {
@@ -16,17 +22,21 @@ enum DownloaderState {
 
 impl Downloader {
     pub fn new(
+        client: reqwest::Client,
         builder: TrackerBuilder,
         status_tx: watch::Sender<Status>,
         command_rx: mpsc::Receiver<Command>,
     ) -> Downloader {
         Downloader {
-            builder: builder,
-            status_tx: status_tx,
-            command_rx: command_rx,
+            client,
+            builder,
+            status_tx,
+            command_rx,
             state: DownloaderState::LETMECOMPILE,
         }
     }
 
-    pub async fn start(&mut self) {}
+    pub async fn run(&mut self) {
+        todo!("use tracker info to download stuff")
+    }
 }

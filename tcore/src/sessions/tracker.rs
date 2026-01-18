@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use thiserror::Error;
 use tokio::{
@@ -9,13 +9,26 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::sessions::downloader::Downloader;
+use crate::{
+    bencode::Torrent,
+    sessions::{client::SessionShared, downloader::Downloader},
+};
 
 pub struct TrackerBuilder {
+    session: Arc<SessionShared>,
+    torrent: Torrent,
     save_to: PathBuf,
 }
 
 impl TrackerBuilder {
+    pub(super) fn new(session: Arc<SessionShared>, torrent: Torrent) -> TrackerBuilder {
+        TrackerBuilder {
+            session,
+            torrent,
+            save_to: "./".into(),
+        }
+    }
+
     pub fn to(mut self, dir: impl Into<PathBuf>) -> Self {
         self.save_to = dir.into();
         self
@@ -27,9 +40,10 @@ impl TrackerBuilder {
         let (status_tx, status_rx) = watch::channel(Status::default());
         let (command_tx, command_rx) = mpsc::channel::<Command>(32);
 
-        let mut downloader = Downloader::new(self, status_tx, command_rx);
+        let mut downloader =
+            Downloader::new(self.session.http.clone(), self, status_tx, command_rx);
         let join = tokio::spawn(async move {
-            downloader.start().await;
+            downloader.run().await;
         });
 
         Ok(Tracker {
@@ -54,8 +68,8 @@ impl Status {
         self.progress
     }
 
-    pub(crate) fn set_progress(&mut self, new: f64) {
-        self.progress = new
+    pub(crate) fn update_progress(&mut self, diff: f64) {
+        self.progress += diff
     }
 
     pub fn download_speed(&self) -> u64 {
@@ -91,6 +105,7 @@ impl Status {
     }
 }
 
+// TODO: control commands
 pub enum Command {}
 
 pub struct Tracker {
@@ -100,7 +115,6 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    // TODO: some functions to request current status
     pub fn status(&self) -> Status {
         self.status_rx.borrow().clone()
     }
@@ -109,6 +123,8 @@ impl Tracker {
         self.status_rx.changed().await.expect("read current status"); // FIXME: no panics
         self.status_rx.borrow().clone()
     }
+
+    // TODO: tracker controls
 }
 
 #[derive(Error, Debug)]
