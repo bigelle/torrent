@@ -1,5 +1,3 @@
-pub mod client;
+pub mod session;
 pub mod tracker;
-mod downloader;
-
-pub use client::Session;
+mod worker;
