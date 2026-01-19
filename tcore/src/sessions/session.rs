@@ -69,10 +69,11 @@ impl Session {
                         );
                     }
                     SessionEvent::RegisterWorker(key, tx) => {
-                        if routes_clone.lock().await.contains_key(&key) {
+                        let mut map = routes_clone.lock().await;
+                        if map.contains_key(&key) {
                             todo!("do something with duplicate key?")
                         }
-                        routes_clone.lock().await.insert(key, tx);
+                        map.insert(key, tx);
                     }
                     SessionEvent::UnregisterWorker(key) => {
                         routes_clone.lock().await.remove(&key);

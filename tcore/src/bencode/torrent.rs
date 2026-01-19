@@ -9,8 +9,8 @@ use super::decoder::{DecodeError, Decoder, Token, TokenKind};
 
 #[derive(Default, Debug)]
 pub struct Torrent {
-    announce: String,
-    info: Info,
+    pub announce: String,
+    pub info: Info,
 }
 
 impl Torrent {
@@ -29,17 +29,33 @@ impl Torrent {
         }
         Ok(())
     }
+
+    pub fn total_length(&self ) -> u64 {
+        if let Some(length) = self.info.length{
+            return length as u64;
+        }
+        
+        if let Some(files) = &self.info.files {
+            let mut total = 0;
+            for file in files {
+                total += file.length;
+            }
+            return total as u64;
+        }
+
+        0
+    }
 }
 
 #[derive(Default, Debug, PartialEq)]
 pub struct Info {
-    info_hash: [u8; 20],
+    pub info_hash: [u8; 20],
 
-    name: String,
-    piece_length: u64,
-    pieces: Vec<u8>,
-    length: Option<u64>,
-    files: Option<Vec<File>>,
+    pub name: String,
+    pub piece_length: u64,
+    pub pieces: Vec<u8>,
+    pub length: Option<u64>,
+    pub files: Option<Vec<File>>,
 }
 
 impl Info {

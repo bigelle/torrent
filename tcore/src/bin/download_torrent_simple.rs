@@ -1,6 +1,6 @@
 use std::env;
 
-use tcore::{bencode::Torrent, sessions::Session};
+use tcore::{bencode::Torrent, sessions::session::Session, };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -10,22 +10,20 @@ async fn main() -> anyhow::Result<()> {
     }
     let torrent = Torrent::from_file(&args[1])?;
 
-    let session = Session::make()
-        .await
-        .expect("there should be available ports");
-    let tracker = session.add_tracker(torrent).to(&args[2]).begin().await?;
+    let session = Session::bind().await?;
+    let tracker = session.add_torrent(torrent).save_to("./out").begin().await?;
 
     loop {
         let st = tracker.status();
         println!(
             "{:.1}% | ↓ {} KB/s | peers {} | seeds {}",
-            st.progress() * 100.0,
-            st.download_speed() / 1024,
-            st.peers(),
-            st.seeds(),
+            st.progress * 100.0,
+            st.download_speed / 1024,
+            st.peers,
+            st.seeds,
         );
 
-        if st.is_finished() {
+        if st.is_finished {
             break;
         }
 

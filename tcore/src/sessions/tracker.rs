@@ -16,9 +16,9 @@ use crate::{
 };
 
 pub struct TrackerBuilder {
-    torrent: Torrent,
-    save_to: PathBuf,
-    session: Arc<SessionShared>,
+    pub(super) torrent: Torrent,
+    pub(super) save_to: PathBuf,
+    pub(super) session: Arc<SessionShared>,
 }
 
 impl TrackerBuilder {
@@ -52,7 +52,7 @@ impl TrackerBuilder {
             .send(SessionEvent::RegisterWorker(info_hash, stream_tx))
             .await;
 
-        let worker = Worker::new(command_rx, status_tx, stream_rx, self);
+        let mut worker = Worker::new(command_rx, status_tx, stream_rx, self);
 
         let join = tokio::spawn(async move {
             worker.work().await;
@@ -72,13 +72,48 @@ pub(super) enum Command {
     Abort,
 }
 
-#[derive(Default)]
-pub struct TrackerStatus {}
+#[derive(Default, Clone)]
+#[readonly::make]
+pub struct TrackerStatus {
+    pub progress: f64,
+    pub download_speed: u32,
+    pub peers: u32,
+    pub seeds: u32,
+    pub is_finished: bool,
+}
+
+impl TrackerStatus {
+    pub(super) fn update_progress(&mut self, diff: f64) {
+        self.progress += diff
+    }
+
+    pub(super) fn set_download_speed(&mut self, new: u32) {
+        self.download_speed = new
+    }
+
+    pub(super) fn set_peers(&mut self, new: u32) {
+        self.peers = new
+    }
+
+    pub(super) fn set_seeds(&mut self, new: u32) {
+        self.seeds = new
+    }
+
+    pub(super) fn finish(&mut self) {
+        self.is_finished = true
+    }
+}
 
 pub struct Tracker {
     status_rx: watch::Receiver<TrackerStatus>,
     command_tx: mpsc::Sender<Command>,
     join: JoinHandle<()>,
+}
+
+impl Tracker {
+    pub fn status(&self) -> TrackerStatus {
+        self.status_rx.borrow().clone()
+    }
 }
 
 #[derive(Error, Debug)]
